@@ -12,21 +12,24 @@ export class PublisherRegistry {
     return this.publishers.get(channel);
   }
 
+  async publishOne(channel: SocialChannel, content: GeneratedContent) {
+    const publisher = this.publishers.get(channel);
+    if (!publisher) return { channel, status: "not_configured" as const };
+
+    try {
+      const result = await publisher.publish(content);
+      return { channel, status: "sent" as const, ...result };
+    } catch (error) {
+      return {
+        channel,
+        status: "failed" as const,
+        error: error instanceof Error ? error.message : "Falha desconhecida",
+      };
+    }
+  }
+
   async publish(channels: SocialChannel[], contentFactory: (channel: SocialChannel) => GeneratedContent) {
-    return Promise.all(channels.map(async (channel) => {
-      const publisher = this.publishers.get(channel);
-      if (!publisher) return { channel, status: "not_configured" as const };
-      try {
-        const result = await publisher.publish(contentFactory(channel));
-        return { channel, status: "sent" as const, ...result };
-      } catch (error) {
-        return {
-          channel,
-          status: "failed" as const,
-          error: error instanceof Error ? error.message : "Falha desconhecida",
-        };
-      }
-    }));
+    return Promise.all(channels.map((channel) => this.publishOne(channel, contentFactory(channel))));
   }
 }
 
