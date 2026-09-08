@@ -102,7 +102,7 @@ async function handleFetch(request: Request, env: Env) {
   try {
     if (url.pathname === "/scheduler") return json(await schedulerTick(env));
     if (url.pathname === "/worker") return json(await workerTick(env));
-    if (url.pathname === "/test") return manualTest(request, env);
+    if (url.pathname === "/test") return await manualTest(request, env);
     return json(await runFullTick(env));
   } catch (error) {
     console.error("worker request failed", error);
