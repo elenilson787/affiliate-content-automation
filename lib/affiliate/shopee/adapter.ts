@@ -14,7 +14,7 @@ type ShopeeNode = {
   commission?: string | number;
   priceDiscountRate?: string | number;
   sales?: number;
-  ratingStar?: number;
+  ratingStar?: string | number;
   productLink?: string;
   offerLink?: string;
 };
@@ -62,15 +62,22 @@ function mapOffer(node: ShopeeNode, index: number): Offer {
   };
 }
 
+function shopeeSortType(sort: SearchRequest["sort"]) {
+  if (sort === "commission") return 5;
+  if (sort === "price") return 4;
+  if (sort === "sales") return 2;
+  return 1;
+}
+
 export function createShopeeProvider(credentials: ShopeeCredentials): AffiliateProvider {
   return {
     network: "shopee",
     async search(request: SearchRequest) {
       const keyword = request.keyword.trim().slice(0, 80);
-      const page = Math.min(Math.max(Math.trunc(request.page ?? 0), 0), 500);
+      const page = Math.min(Math.max(Math.trunc(request.page ?? 1), 1), 500);
       const limit = Math.min(Math.max(Math.trunc(request.limit ?? 50), 1), 50);
-      const sortType = request.sort === "commission" ? 2 : request.sort === "price" ? 1 : 0;
-      const query = `{ productOfferV2(keyword: ${JSON.stringify(keyword)}, listType: 0, sortType: ${sortType}, page: ${page}, limit: ${limit}) { nodes { shopId itemId productName shopName imageUrl priceMin priceMax priceDiscountRate commissionRate sellerCommissionRate commission sales ratingStar productLink offerLink } } }`;
+      const sortType = shopeeSortType(request.sort);
+      const query = `{ productOfferV2(keyword: ${JSON.stringify(keyword)}, listType: 0, sortType: ${sortType}, page: ${page}, limit: ${limit}) { nodes { shopId itemId productName shopName imageUrl priceMin priceMax priceDiscountRate commissionRate sellerCommissionRate commission sales ratingStar productLink offerLink } pageInfo { page limit hasNextPage } } }`;
       const data = await callShopeeApi<ShopeeResponse>(query, credentials);
       const nodes = Array.isArray(data.productOfferV2?.nodes) ? data.productOfferV2.nodes : [];
       return nodes.map(mapOffer);
