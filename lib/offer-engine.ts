@@ -71,7 +71,8 @@ export function offerLooksLikeAccessory(offer: Offer, keyword: string) {
 }
 
 export function offerKey(offer: Offer) {
-  return `${offer.network}:${offer.id}`;
+  const prefix = `${offer.network}:`;
+  return offer.id.startsWith(prefix) ? offer.id : `${prefix}${offer.id}`;
 }
 
 export function productFingerprint(offer: Offer) {
