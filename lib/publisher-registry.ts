@@ -4,8 +4,12 @@ export class PublisherRegistry {
   private readonly publishers = new Map<SocialChannel, Publisher>();
 
   register(publisher: Publisher) {
-    this.publishers.set(publisher.id, publisher);
+    this.publishers.set(publisher.channel, publisher);
     return this;
+  }
+
+  get(channel: SocialChannel) {
+    return this.publishers.get(channel);
   }
 
   async publish(channels: SocialChannel[], contentFactory: (channel: SocialChannel) => GeneratedContent) {
@@ -16,7 +20,11 @@ export class PublisherRegistry {
         const result = await publisher.publish(contentFactory(channel));
         return { channel, status: "sent" as const, ...result };
       } catch (error) {
-        return { channel, status: "failed" as const, error: error instanceof Error ? error.message : "Falha desconhecida" };
+        return {
+          channel,
+          status: "failed" as const,
+          error: error instanceof Error ? error.message : "Falha desconhecida",
+        };
       }
     }));
   }
