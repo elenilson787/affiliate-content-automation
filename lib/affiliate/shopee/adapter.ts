@@ -24,7 +24,8 @@ type ShopeeResponse = { productOfferV2?: { nodes?: ShopeeNode[] } };
 function percent(value: string | number | undefined) {
   const n = typeof value === "string" ? Number(value) : value;
   if (!Number.isFinite(n)) return 0;
-  return Math.abs(n as number) <= 1 ? (n as number) * 100 : (n as number);
+  const converted = Math.abs(n as number) <= 1 ? (n as number) * 100 : (n as number);
+  return Math.round(converted * 10_000) / 10_000;
 }
 
 function money(value: string | number | undefined) {
