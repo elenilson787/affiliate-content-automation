@@ -15,6 +15,17 @@ create table if not exists public.published_offers (
   metadata jsonb not null default '{}'::jsonb
 );
 
+-- Compatibility with the legacy 0001 migration, which may have already
+-- created published_offers with fewer columns and a permanent uniqueness rule.
+alter table public.published_offers
+  add column if not exists source_queue_id uuid references public.publication_queue(id) on delete set null;
+alter table public.published_offers
+  add column if not exists run_id uuid references public.automation_runs(id) on delete set null;
+alter table public.published_offers
+  add column if not exists rule_id uuid references public.automation_rules(id) on delete set null;
+alter table public.published_offers
+  drop constraint if exists published_offers_offer_channel_unique;
+
 create unique index if not exists published_offers_source_queue_unique
   on public.published_offers (source_queue_id)
   where source_queue_id is not null;
