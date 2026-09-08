@@ -8,7 +8,7 @@
     "enabled": true
   },
   "triggers": {
-    "crons": []
+    "crons": ["*/5 * * * *"]
   },
   "vars": {
     "SUPABASE_URL": "https://elxzvlbqsodsgygopsxw.supabase.co",
