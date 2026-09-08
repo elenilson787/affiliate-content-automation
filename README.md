@@ -44,6 +44,66 @@ Telegram · WhatsApp · Facebook · Instagram · Threads
 - Infraestrutura pequena e barata.
 - APIs oficiais quando disponíveis.
 
+## Telegram
+
+O primeiro canal de publicação implementado é o Telegram.
+
+Variáveis necessárias no ambiente do servidor:
+
+```env
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_CHAT_ID=
+```
+
+Nunca use `NEXT_PUBLIC_` nessas variáveis e nunca coloque tokens no Git. Em desenvolvimento, use `.env.local`; em produção, configure as variáveis no provedor de hospedagem.
+
+### Testar o Telegram
+
+Com o app rodando, envie um `POST` para:
+
+```text
+/api/telegram/test
+```
+
+Exemplo de corpo:
+
+```json
+{
+  "message": "🔥 Oferta de teste!",
+  "cta": "👉 Confira agora",
+  "affiliateUrl": "https://example.com"
+}
+```
+
+O endpoint retorna o `externalId`, que corresponde ao `message_id` retornado pelo Telegram.
+
+## Teste da automação sem publicar
+
+O endpoint abaixo executa busca + filtros + ranking + geração de conteúdo, mas não publica:
+
+```text
+POST /api/automation/test
+```
+
+Exemplo:
+
+```json
+{
+  "keyword": "celular",
+  "quantity": 5,
+  "minCommission": 5,
+  "minDiscount": 20,
+  "maxPrice": 1500
+}
+```
+
+Para esse teste, configure também:
+
+```env
+SHOPEE_APP_ID=
+SHOPEE_SECRET=
+```
+
 ## Estado atual
 
-A fundação inicial foi extraída do Afiliapulse e está sendo reconstruída aqui de forma independente. O próximo marco é implementar o adapter real da Shopee e conectar a busca automática ao pipeline.
+Fundação independente criada e camada central normalizada. A Shopee possui adapter/client real e o Telegram possui publisher real. O próximo passo é conectar o resultado da automação ao publisher Telegram, adicionar deduplicação persistente e depois criar os demais publishers e adapters.
