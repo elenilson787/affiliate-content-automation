@@ -4,17 +4,17 @@ export class AffiliateRegistry {
   private readonly providers = new Map<AffiliateNetwork, AffiliateProvider>();
 
   register(provider: AffiliateProvider) {
-    this.providers.set(provider.id, provider);
+    this.providers.set(provider.network, provider);
     return this;
   }
 
-  get(id: AffiliateNetwork) {
-    return this.providers.get(id);
+  get(network: AffiliateNetwork) {
+    return this.providers.get(network);
   }
 
   async search(networks: AffiliateNetwork[], request: SearchRequest) {
     const providers = networks
-      .map((id) => this.providers.get(id))
+      .map((network) => this.providers.get(network))
       .filter((provider): provider is AffiliateProvider => Boolean(provider));
 
     const batches = await Promise.all(
