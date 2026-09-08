@@ -26,6 +26,28 @@ const ACCESSORY_LEADS = [
   "peca reposicao",
   "reposicao",
   "refil",
+  "cerdas",
+  "cerda",
+  "bico",
+  "cabo",
+  "resistencia",
+];
+
+// Marcadores fortes de peça/acessório. Diferente de ACCESSORY_LEADS,
+// estes bloqueiam mesmo quando aparecem no meio do título, porque normalmente
+// indicam que o anúncio é de reposição e não do produto principal.
+const STRONG_ACCESSORY_MARKERS = [
+  "peca de reposicao",
+  "peca reposicao",
+  "refil",
+  "cerdas para",
+  "cerda para",
+  "kit de cerdas",
+  "kit cerdas",
+  "bico para",
+  "cabo para",
+  "resistencia para",
+  "compativel com",
 ];
 
 function sourceMetric(offer: Offer, key: string) {
@@ -43,7 +65,9 @@ function keywordRequestsAccessory(keyword: string) {
 export function offerLooksLikeAccessory(offer: Offer, keyword: string) {
   if (keywordRequestsAccessory(keyword)) return false;
   const title = normalized(offer.title);
-  return ACCESSORY_LEADS.some((lead) => title === lead || title.startsWith(`${lead} `));
+
+  if (ACCESSORY_LEADS.some((lead) => title === lead || title.startsWith(`${lead} `))) return true;
+  return STRONG_ACCESSORY_MARKERS.some((marker) => title === marker || title.includes(` ${marker} `) || title.endsWith(` ${marker}`));
 }
 
 export function offerKey(offer: Offer) {
@@ -58,7 +82,10 @@ export function discountPercent(offer: Offer) {
 export function offerIsRelevant(offer: Offer, keyword: string) {
   const haystack = normalized(`${offer.title} ${offer.category || ""}`);
   const terms = normalized(keyword).split(/\s+/).filter((term) => term.length >= 3);
-  if (terms.length > 0 && !terms.some((term) => haystack.includes(term))) return false;
+
+  // Em buscas compostas (ex.: "escova secadora"), todos os termos relevantes
+  // precisam aparecer. Isso reduz resultados semanticamente próximos, mas errados.
+  if (terms.length > 0 && !terms.every((term) => haystack.includes(term))) return false;
   if (offerLooksLikeAccessory(offer, keyword)) return false;
   return true;
 }
