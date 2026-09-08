@@ -9,6 +9,13 @@ function normalized(value: string) {
     .trim();
 }
 
+function sourceMetric(offer: Offer, key: string) {
+  const raw = offer.sourceMetadata?.[key];
+  if (raw == null || raw === "") return undefined;
+  const value = typeof raw === "number" ? raw : Number(raw);
+  return Number.isFinite(value) ? value : undefined;
+}
+
 export function offerKey(offer: Offer) {
   return `${offer.network}:${offer.id}`;
 }
@@ -24,10 +31,24 @@ export function offerIsRelevant(offer: Offer, keyword: string) {
   return terms.length === 0 || terms.some((term) => haystack.includes(term));
 }
 
+export function offerHasTrustSignals(offer: Offer) {
+  const sales = sourceMetric(offer, "sales");
+  const rating = sourceMetric(offer, "rating");
+
+  // Quando a rede fornece métricas explicitamente zeradas, tratamos a oferta
+  // como inadequada para publicação automática. Métrica ausente não bloqueia.
+  if (sales !== undefined && sales <= 0) return false;
+  if (rating !== undefined && rating <= 0) return false;
+  return true;
+}
+
 export function rankOffer(offer: Offer) {
   const discount = offer.discountPercent ?? discountPercent(offer);
   const commission = Math.max(0, offer.commissionPercent ?? 0);
-  return discount * 0.6 + commission * 0.4;
+  const sales = Math.max(0, sourceMetric(offer, "sales") ?? 0);
+  const rating = Math.max(0, Math.min(5, sourceMetric(offer, "rating") ?? 0));
+  const trustBonus = rating * 2 + Math.log10(sales + 1) * 3;
+  return discount * 0.55 + commission * 0.35 + trustBonus;
 }
 
 export function selectOffers(
@@ -44,6 +65,7 @@ export function selectOffers(
 
   return pool
     .filter((offer) => offerIsRelevant(offer, input.keyword))
+    .filter(offerHasTrustSignals)
     .filter((offer) => input.minCommission == null || (offer.commissionPercent ?? 0) >= input.minCommission)
     .filter((offer) => input.maxPrice == null || offer.price == null || offer.price <= input.maxPrice)
     .filter((offer) => input.minDiscount == null || (offer.discountPercent ?? discountPercent(offer)) >= input.minDiscount)
