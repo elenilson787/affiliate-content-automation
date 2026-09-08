@@ -2,18 +2,12 @@ import type { GeneratedContent, Publisher } from "../types";
 
 const TELEGRAM_API = "https://api.telegram.org";
 
-function requiredEnv(name: string) {
-  const value = process.env[name];
-  if (!value) throw new Error(`TELEGRAM_NOT_CONFIGURED: ${name}`);
-  return value;
-}
-
 async function telegramRequest<T>(token: string, method: string, body: Record<string, unknown>): Promise<T> {
   const response = await fetch(`${TELEGRAM_API}/bot${token}/${method}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(10000),
+    signal: AbortSignal.timeout(10_000),
   });
 
   const payload = await response.json().catch(() => null) as { ok?: boolean; description?: string; result?: T } | null;
@@ -23,9 +17,8 @@ async function telegramRequest<T>(token: string, method: string, body: Record<st
   return payload.result as T;
 }
 
-export function createTelegramPublisher(input?: { token?: string; chatId?: string }): Publisher {
-  const token = input?.token || requiredEnv("TELEGRAM_BOT_TOKEN");
-  const chatId = input?.chatId || requiredEnv("TELEGRAM_CHAT_ID");
+export function createTelegramPublisher(input: { token: string; chatId: string }): Publisher {
+  if (!input.token || !input.chatId) throw new Error("TELEGRAM_NOT_CONFIGURED");
 
   return {
     channel: "telegram",
@@ -33,16 +26,16 @@ export function createTelegramPublisher(input?: { token?: string; chatId?: strin
       const caption = `${content.body}\n\n${content.cta}`;
 
       if (content.imageUrl) {
-        const result = await telegramRequest<{ message_id: number }>(token, "sendPhoto", {
-          chat_id: chatId,
+        const result = await telegramRequest<{ message_id: number }>(input.token, "sendPhoto", {
+          chat_id: input.chatId,
           photo: content.imageUrl,
           caption: caption.slice(0, 1024),
         });
         return { externalId: String(result.message_id) };
       }
 
-      const result = await telegramRequest<{ message_id: number }>(token, "sendMessage", {
-        chat_id: chatId,
+      const result = await telegramRequest<{ message_id: number }>(input.token, "sendMessage", {
+        chat_id: input.chatId,
         text: caption,
         disable_web_page_preview: false,
       });
