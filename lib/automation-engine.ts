@@ -2,11 +2,15 @@ import { affiliateRegistry } from "./affiliate-registry";
 import { generateContent } from "./content-engine";
 import { offerKey, selectOffers } from "./offer-engine";
 import { publisherRegistry } from "./publisher-registry";
-import type { AutomationConfig, Offer } from "./types";
+import type { AutomationConfig, GeneratedContent, Offer, SocialChannel } from "./types";
 
 export type AutomationRunOptions = {
   dryRun?: boolean;
 };
+
+type PublicationResult =
+  | { channel: SocialChannel; status: "dry_run"; content: GeneratedContent }
+  | { channel: SocialChannel; status: "sent" | "failed" | "not_configured"; externalId?: string; error?: string };
 
 export async function runAutomation(config: AutomationConfig, options: AutomationRunOptions = {}) {
   const selected: Offer[] = [];
@@ -30,14 +34,17 @@ export async function runAutomation(config: AutomationConfig, options: Automatio
     }
   }
 
-  const publications = selected.map((offer) => ({
-    offer,
-    results: options.dryRun
-      ? config.channels.map((channel) => ({ channel, status: "dry_run" as const, content: generateContent(offer, channel) }))
-      : undefined,
-  }));
+  const publications: { offer: Offer; results?: PublicationResult[] }[] = selected.map((offer) => ({ offer }));
 
-  if (!options.dryRun) {
+  if (options.dryRun) {
+    for (const publication of publications) {
+      publication.results = config.channels.map((channel) => ({
+        channel,
+        status: "dry_run" as const,
+        content: generateContent(publication.offer, channel),
+      }));
+    }
+  } else {
     for (const publication of publications) {
       publication.results = await publisherRegistry.publish(
         config.channels,
