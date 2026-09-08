@@ -9,11 +9,41 @@ function normalized(value: string) {
     .trim();
 }
 
+const ACCESSORY_LEADS = [
+  "kit suporte",
+  "kit de suporte",
+  "suporte",
+  "porta",
+  "descanso",
+  "organizador",
+  "capa",
+  "case",
+  "estojo",
+  "bolsa",
+  "adaptador",
+  "acessorio",
+  "peca de reposicao",
+  "peca reposicao",
+  "reposicao",
+  "refil",
+];
+
 function sourceMetric(offer: Offer, key: string) {
   const raw = offer.sourceMetadata?.[key];
   if (raw == null || raw === "") return undefined;
   const value = typeof raw === "number" ? raw : Number(raw);
   return Number.isFinite(value) ? value : undefined;
+}
+
+function keywordRequestsAccessory(keyword: string) {
+  const value = normalized(keyword);
+  return ACCESSORY_LEADS.some((lead) => value === lead || value.startsWith(`${lead} `) || value.includes(` ${lead} `));
+}
+
+export function offerLooksLikeAccessory(offer: Offer, keyword: string) {
+  if (keywordRequestsAccessory(keyword)) return false;
+  const title = normalized(offer.title);
+  return ACCESSORY_LEADS.some((lead) => title === lead || title.startsWith(`${lead} `));
 }
 
 export function offerKey(offer: Offer) {
@@ -28,7 +58,9 @@ export function discountPercent(offer: Offer) {
 export function offerIsRelevant(offer: Offer, keyword: string) {
   const haystack = normalized(`${offer.title} ${offer.category || ""}`);
   const terms = normalized(keyword).split(/\s+/).filter((term) => term.length >= 3);
-  return terms.length === 0 || terms.some((term) => haystack.includes(term));
+  if (terms.length > 0 && !terms.some((term) => haystack.includes(term))) return false;
+  if (offerLooksLikeAccessory(offer, keyword)) return false;
+  return true;
 }
 
 export function offerHasTrustSignals(offer: Offer) {
