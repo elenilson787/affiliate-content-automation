@@ -74,6 +74,10 @@ export function offerKey(offer: Offer) {
   return `${offer.network}:${offer.id}`;
 }
 
+export function productFingerprint(offer: Offer) {
+  return normalized(offer.title);
+}
+
 export function discountPercent(offer: Offer) {
   if (!offer.originalPrice || offer.price == null || offer.originalPrice <= offer.price) return 0;
   return ((offer.originalPrice - offer.price) / offer.originalPrice) * 100;
@@ -120,7 +124,8 @@ export function selectOffers(
     limit?: number;
   },
 ) {
-  const seen = new Set<string>();
+  const seenOffers = new Set<string>();
+  const seenProducts = new Set<string>();
 
   return pool
     .filter((offer) => offerIsRelevant(offer, input.keyword))
@@ -128,12 +133,14 @@ export function selectOffers(
     .filter((offer) => input.minCommission == null || (offer.commissionPercent ?? 0) >= input.minCommission)
     .filter((offer) => input.maxPrice == null || offer.price == null || offer.price <= input.maxPrice)
     .filter((offer) => input.minDiscount == null || (offer.discountPercent ?? discountPercent(offer)) >= input.minDiscount)
+    .sort((a, b) => rankOffer(b) - rankOffer(a))
     .filter((offer) => {
       const key = offerKey(offer);
-      if (seen.has(key)) return false;
-      seen.add(key);
+      const product = productFingerprint(offer);
+      if (seenOffers.has(key) || seenProducts.has(product)) return false;
+      seenOffers.add(key);
+      seenProducts.add(product);
       return true;
     })
-    .sort((a, b) => rankOffer(b) - rankOffer(a))
     .slice(0, input.limit || 10);
 }
