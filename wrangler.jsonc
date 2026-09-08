@@ -7,6 +7,9 @@
   "observability": {
     "enabled": true
   },
+  "triggers": {
+    "crons": []
+  },
   "vars": {
     "SUPABASE_URL": "https://elxzvlbqsodsgygopsxw.supabase.co",
     "DEFAULT_TIMEZONE": "America/Sao_Paulo",
