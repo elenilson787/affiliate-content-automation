@@ -104,6 +104,59 @@ SHOPEE_APP_ID=
 SHOPEE_SECRET=
 ```
 
+## Publicação automática + deduplicação
+
+O endpoint abaixo executa Shopee → filtros → copy → Telegram. Por segurança, `dryRun` é `true` por padrão.
+
+```text
+POST /api/automation/publish
+```
+
+Exemplo de publicação real:
+
+```json
+{
+  "keyword": "celular",
+  "quantity": 3,
+  "minCommission": 5,
+  "minDiscount": 20,
+  "maxPrice": 1500,
+  "avoidRepeatDays": 7,
+  "dryRun": false
+}
+```
+
+A deduplicação persistente usa Supabase e considera a combinação **oferta + canal**. Uma oferta já publicada no Telegram dentro de `avoidRepeatDays` recebe `skipped_duplicate` e não é enviada novamente.
+
+Variáveis adicionais:
+
+```env
+SUPABASE_URL=
+SUPABASE_SERVICE_ROLE_KEY=
+```
+
+`SUPABASE_SERVICE_ROLE_KEY` é exclusivamente server-side e nunca deve receber prefixo `NEXT_PUBLIC_`.
+
+### Banco
+
+A tabela `published_offers` é criada pela migration:
+
+```text
+supabase/migrations/0001_create_published_offers.sql
+```
+
+Ela possui índice por `published_at`, unicidade por `offer_key + channel` e RLS habilitado sem acesso para `anon`/`authenticated`. O acesso da aplicação é feito somente no servidor com a service role key.
+
 ## Estado atual
 
-Fundação independente criada e camada central normalizada. A Shopee possui adapter/client real e o Telegram possui publisher real. O próximo passo é conectar o resultado da automação ao publisher Telegram, adicionar deduplicação persistente e depois criar os demais publishers e adapters.
+Fundação independente criada e camada central normalizada. A Shopee possui adapter/client real, o Telegram possui publisher real e a automação já está conectada à publicação. A deduplicação persistente foi adicionada com Supabase.
+
+### Próximos passos
+
+1. Scheduler/worker para execução automática.
+2. Fila de publicação com retry e backoff.
+3. Adapter Amazon.
+4. Adapter Mercado Livre.
+5. Adapter Magalu/AliExpress.
+6. Publishers WhatsApp, Facebook, Instagram e Threads.
+7. Regras de conteúdo específicas por canal.
