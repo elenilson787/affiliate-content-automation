@@ -1,6 +1,6 @@
 import { createShopeeProvider } from "../lib/affiliate/shopee/adapter";
 import { generateContent } from "../lib/content-engine";
-import { selectOffers } from "../lib/offer-engine";
+import { searchQualifiedOffers } from "../lib/search-engine";
 import { runFullTick, schedulerTick, workerTick } from "./automation";
 import { required, type Env } from "./env";
 
@@ -54,25 +54,25 @@ async function manualTest(request: Request, env: Env) {
     appId: required(env.SHOPEE_APP_ID, "SHOPEE_APP_ID"),
     secret: required(env.SHOPEE_SECRET, "SHOPEE_SECRET"),
   });
-  const pool = await provider.search({
-    keyword,
-    minCommission: numberOrUndefined(body.minCommission),
-    minDiscount: numberOrUndefined(body.minDiscount),
-    maxPrice: numberOrUndefined(body.maxPrice),
-    limit: Math.min(quantity * 5, 50),
-  });
-  const selected = selectOffers(pool, {
-    keyword,
-    minCommission: numberOrUndefined(body.minCommission),
-    minDiscount: numberOrUndefined(body.minDiscount),
-    maxPrice: numberOrUndefined(body.maxPrice),
-    limit: quantity,
-  });
+
+  const search = await searchQualifiedOffers(
+    provider,
+    {
+      keyword,
+      minCommission: numberOrUndefined(body.minCommission),
+      minDiscount: numberOrUndefined(body.minDiscount),
+      maxPrice: numberOrUndefined(body.maxPrice),
+    },
+    quantity,
+    { maxPages: 3, pageSize: 50 },
+  );
 
   return json({
     dryRun: true,
-    selected: selected.length,
-    publications: selected.map((offer) => ({
+    selected: search.selected.length,
+    scanned: search.scanned,
+    pages: search.pages,
+    publications: search.selected.map((offer) => ({
       offer,
       content: generateContent(offer, "telegram"),
     })),
