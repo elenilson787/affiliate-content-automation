@@ -32,6 +32,12 @@ function money(value: string | number | undefined) {
   return Number.isFinite(n) ? Number(n) : undefined;
 }
 
+function inferredOriginalPrice(price: number | undefined, discount: number) {
+  if (price === undefined || discount <= 0 || discount >= 100) return undefined;
+  const original = price / (1 - discount / 100);
+  return Number.isFinite(original) ? Math.round(original * 100) / 100 : undefined;
+}
+
 function mapOffer(node: ShopeeNode, index: number): Offer {
   const price = money(node.priceMin ?? node.priceMax);
   const discount = percent(node.priceDiscountRate);
@@ -45,7 +51,7 @@ function mapOffer(node: ShopeeNode, index: number): Offer {
     affiliateUrl: node.offerLink || node.productLink || "https://shopee.com.br",
     imageUrl: node.imageUrl,
     price,
-    originalPrice: price !== undefined && discount > 0 ? price / (1 - discount / 100) : undefined,
+    originalPrice: inferredOriginalPrice(price, discount),
     discountPercent: discount || undefined,
     commissionPercent: commissionRate || undefined,
     commissionValue: money(node.commission),
@@ -62,13 +68,6 @@ function mapOffer(node: ShopeeNode, index: number): Offer {
   };
 }
 
-function shopeeSortType(sort: SearchRequest["sort"]) {
-  if (sort === "commission") return 5;
-  if (sort === "price") return 4;
-  if (sort === "sales") return 2;
-  return 1;
-}
-
 export function createShopeeProvider(credentials: ShopeeCredentials): AffiliateProvider {
   return {
     network: "shopee",
@@ -76,8 +75,14 @@ export function createShopeeProvider(credentials: ShopeeCredentials): AffiliateP
       const keyword = request.keyword.trim().slice(0, 80);
       const page = Math.min(Math.max(Math.trunc(request.page ?? 1), 1), 500);
       const limit = Math.min(Math.max(Math.trunc(request.limit ?? 50), 1), 50);
-      const sortType = shopeeSortType(request.sort);
-      const query = `{ productOfferV2(keyword: ${JSON.stringify(keyword)}, listType: 0, sortType: ${sortType}, page: ${page}, limit: ${limit}) { nodes { shopId itemId productName shopName imageUrl priceMin priceMax priceDiscountRate commissionRate sellerCommissionRate commission sales ratingStar productLink offerLink } pageInfo { page limit hasNextPage } } }`;
+      const sortType = request.sort === "commission"
+        ? 5
+        : request.sort === "price"
+          ? 4
+          : request.sort === "sales"
+            ? 2
+            : 1;
+      const query = `{ productOfferV2(keyword: ${JSON.stringify(keyword)}, listType: 0, sortType: ${sortType}, page: ${page}, limit: ${limit}) { nodes { shopId itemId productName shopName imageUrl priceMin priceMax priceDiscountRate commissionRate sellerCommissionRate commission sales ratingStar productLink offerLink } } }`;
       const data = await callShopeeApi<ShopeeResponse>(query, credentials);
       const nodes = Array.isArray(data.productOfferV2?.nodes) ? data.productOfferV2.nodes : [];
       return nodes.map(mapOffer);
