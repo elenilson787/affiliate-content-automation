@@ -5,15 +5,17 @@ export type Offer = {
   id: string;
   network: AffiliateNetwork;
   title: string;
-  url: string;
+  productUrl: string;
   affiliateUrl?: string;
   imageUrl?: string;
-  price: number;
+  price?: number;
   originalPrice?: number;
-  commission?: number;
-  shopName?: string;
+  discountPercent?: number;
+  commissionPercent?: number;
+  commissionValue?: number;
   category?: string;
-  metadata?: Record<string, unknown>;
+  availability?: boolean;
+  sourceMetadata?: Record<string, unknown>;
 };
 
 export type SearchRequest = {
@@ -23,12 +25,14 @@ export type SearchRequest = {
   maxPrice?: number;
   minDiscount?: number;
   limit?: number;
+  page?: number;
+  sort?: "commission" | "price" | "sales" | "discount";
 };
 
 export type AffiliateProvider = {
-  id: AffiliateNetwork;
+  network: AffiliateNetwork;
   search(request: SearchRequest): Promise<Offer[]>;
-  createAffiliateUrl?(offer: Offer): Promise<string>;
+  createAffiliateUrl?(inputUrl: string, trackingId?: string): Promise<string>;
 };
 
 export type GeneratedContent = {
@@ -41,7 +45,7 @@ export type GeneratedContent = {
 };
 
 export type Publisher = {
-  id: SocialChannel;
+  channel: SocialChannel;
   publish(content: GeneratedContent): Promise<{ externalId?: string }>;
 };
 
