@@ -1,7 +1,8 @@
 import { createShopeeProvider } from "../lib/affiliate/shopee/adapter";
 import { generateContent } from "../lib/content-engine";
-import { offerKey, selectOffers } from "../lib/offer-engine";
+import { offerKey } from "../lib/offer-engine";
 import { createTelegramPublisher } from "../lib/publishers/telegram";
+import { searchQualifiedOffers } from "../lib/search-engine";
 import type { GeneratedContent, Offer } from "../lib/types";
 import { findDueSlot, stableUuid } from "./cron";
 import { SupabaseRest, eq, type AutomationRuleRow, type PublicationQueueRow } from "./db";
@@ -72,8 +73,10 @@ async function updateRun(db: SupabaseRest, runId: string, patch: Record<string, 
 }
 
 async function searchOffers(env: Env, rule: AutomationRuleRow) {
-  const pool: Offer[] = [];
+  const selected: Offer[] = [];
   const unsupportedNetworks: string[] = [];
+  let scanned = 0;
+  let pages = 0;
 
   for (const network of rule.networks) {
     if (network !== "shopee") {
@@ -86,27 +89,27 @@ async function searchOffers(env: Env, rule: AutomationRuleRow) {
       secret: required(env.SHOPEE_SECRET, "SHOPEE_SECRET"),
     });
 
-    const offers = await provider.search({
-      keyword: rule.keyword,
-      category: rule.category || undefined,
-      minCommission: rule.min_commission ?? undefined,
-      minDiscount: rule.min_discount ?? undefined,
-      maxPrice: rule.max_price ?? undefined,
-      sort: rule.sort || undefined,
-      limit: Math.min(Math.max(rule.quantity * 5, 10), 50),
-    });
-    pool.push(...offers);
+    const result = await searchQualifiedOffers(
+      provider,
+      {
+        keyword: rule.keyword,
+        category: rule.category || undefined,
+        minCommission: rule.min_commission ?? undefined,
+        minDiscount: rule.min_discount ?? undefined,
+        maxPrice: rule.max_price ?? undefined,
+        sort: rule.sort || undefined,
+      },
+      rule.quantity,
+      { maxPages: 3, pageSize: 50 },
+    );
+
+    selected.push(...result.selected);
+    scanned += result.scanned;
+    pages += result.pages;
   }
 
-  const selected = selectOffers(pool, {
-    keyword: rule.keyword,
-    minCommission: rule.min_commission ?? undefined,
-    minDiscount: rule.min_discount ?? undefined,
-    maxPrice: rule.max_price ?? undefined,
-    limit: rule.quantity,
-  });
-
-  return { selected, unsupportedNetworks };
+  const uniqueSelected = Array.from(new Map(selected.map((offer) => [offerKey(offer), offer])).values()).slice(0, rule.quantity);
+  return { selected: uniqueSelected, unsupportedNetworks, scanned, pages };
 }
 
 async function executeRule(db: SupabaseRest, env: Env, rule: AutomationRuleRow, slot: Date): Promise<RuleExecutionResult> {
@@ -138,7 +141,7 @@ async function executeRule(db: SupabaseRest, env: Env, rule: AutomationRuleRow, 
   }
 
   try {
-    const { selected, unsupportedNetworks } = await searchOffers(env, rule);
+    const { selected, unsupportedNetworks, scanned, pages } = await searchOffers(env, rule);
 
     if (rule.dry_run) {
       const preview = selected.slice(0, 20).flatMap((offer) =>
@@ -161,6 +164,8 @@ async function executeRule(db: SupabaseRest, env: Env, rule: AutomationRuleRow, 
           scheduleSlot: slotIso,
           timezone: rule.timezone,
           unsupportedNetworks,
+          searchScanned: scanned,
+          searchPages: pages,
           dryRunPreview: preview,
         },
       });
@@ -217,6 +222,8 @@ async function executeRule(db: SupabaseRest, env: Env, rule: AutomationRuleRow, 
         scheduleSlot: slotIso,
         timezone: rule.timezone,
         unsupportedNetworks,
+        searchScanned: scanned,
+        searchPages: pages,
       },
     });
 
