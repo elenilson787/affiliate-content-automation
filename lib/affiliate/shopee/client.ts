@@ -4,6 +4,16 @@ export type ShopeeCredentials = {
 };
 
 const SHOPEE_API_URL = "https://open-api.affiliate.shopee.com.br/graphql";
+const SHOPEE_SYSTEM_ERROR = 10000;
+const MAX_SYSTEM_ERROR_RETRIES = 2;
+
+type ShopeeGraphQLError = {
+  message?: string;
+  extensions?: {
+    code?: number | string;
+    message?: string;
+  };
+};
 
 async function sha256(value: string) {
   const bytes = new TextEncoder().encode(value);
@@ -13,9 +23,23 @@ async function sha256(value: string) {
     .join("");
 }
 
-export async function callShopeeApi<T>(query: string, credentials: ShopeeCredentials): Promise<T> {
-  if (!credentials.appId || !credentials.secret) throw new Error("SHOPEE_API_NOT_CONFIGURED");
+function sleep(ms: number) {
+  return new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
 
+function shopeeError(errors: ShopeeGraphQLError[] | undefined, status: number) {
+  const first = errors?.[0];
+  const code = Number(first?.extensions?.code);
+  const detail = first?.extensions?.message || first?.message;
+  const prefix = Number.isFinite(code) ? `SHOPEE_API_ERROR_${code}` : `SHOPEE_API_HTTP_${status}`;
+  return new Error(`${prefix}: ${detail || "Falha desconhecida na API Shopee"}`);
+}
+
+function isRetryableSystemError(error: unknown) {
+  return error instanceof Error && error.message.startsWith(`SHOPEE_API_ERROR_${SHOPEE_SYSTEM_ERROR}:`);
+}
+
+async function callShopeeApiOnce<T>(query: string, credentials: ShopeeCredentials): Promise<T> {
   const timestamp = Math.floor(Date.now() / 1000).toString();
   const payload = JSON.stringify({ query });
   const signature = await sha256(`${credentials.appId}${timestamp}${payload}${credentials.secret}`);
@@ -32,10 +56,16 @@ export async function callShopeeApi<T>(query: string, credentials: ShopeeCredent
       body: payload,
       signal: controller.signal,
     });
-    const data = (await response.json()) as { data?: T; errors?: Array<{ message?: string }> };
+
+    const data = (await response.json()) as {
+      data?: T;
+      errors?: ShopeeGraphQLError[];
+    };
+
     if (!response.ok || data.errors?.length || !data.data) {
-      throw new Error(data.errors?.[0]?.message || "SHOPEE_API_ERROR");
+      throw shopeeError(data.errors, response.status);
     }
+
     return data.data;
   } catch (error) {
     if (error instanceof Error && error.name === "AbortError") throw new Error("SHOPEE_API_TIMEOUT");
@@ -43,6 +73,21 @@ export async function callShopeeApi<T>(query: string, credentials: ShopeeCredent
   } finally {
     clearTimeout(timeout);
   }
+}
+
+export async function callShopeeApi<T>(query: string, credentials: ShopeeCredentials): Promise<T> {
+  if (!credentials.appId || !credentials.secret) throw new Error("SHOPEE_API_NOT_CONFIGURED");
+
+  for (let attempt = 0; attempt <= MAX_SYSTEM_ERROR_RETRIES; attempt += 1) {
+    try {
+      return await callShopeeApiOnce<T>(query, credentials);
+    } catch (error) {
+      if (!isRetryableSystemError(error) || attempt === MAX_SYSTEM_ERROR_RETRIES) throw error;
+      await sleep(attempt === 0 ? 250 : 750);
+    }
+  }
+
+  throw new Error("SHOPEE_API_RETRY_EXHAUSTED");
 }
 
 export async function generateShopeeAffiliateLink(
