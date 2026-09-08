@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { affiliateRegistry } from "@/lib/affiliate-registry";
 import { runAutomation } from "@/lib/automation-engine";
+import { createSupabaseDedupeStore } from "@/lib/dedupe-store";
 import { createShopeeProvider } from "@/lib/affiliate/shopee";
 import { createTelegramPublisher } from "@/lib/publishers/telegram";
 import { publisherRegistry } from "@/lib/publisher-registry";
@@ -22,6 +23,7 @@ export async function POST(request: Request) {
 
     const quantity = Math.min(Math.max(Math.trunc(Number(body.quantity ?? 1)), 1), 20);
     const dryRun = body.dryRun !== false;
+    const avoidRepeatDays = Math.min(Math.max(Math.trunc(Number(body.avoidRepeatDays ?? 7)), 0), 365);
     const rule: AutomationRule = {
       keyword,
       quantity,
@@ -43,14 +45,16 @@ export async function POST(request: Request) {
       publisherRegistry.register(createTelegramPublisher());
     }
 
+    const dedupeStore = !dryRun && avoidRepeatDays > 0 ? createSupabaseDedupeStore() : undefined;
+
     const result = await runAutomation(
       {
         networks: ["shopee"],
         channels: [...channels],
         rules: [rule],
-        avoidRepeatDays: 0,
+        avoidRepeatDays,
       },
-      { dryRun },
+      { dryRun, dedupeStore },
     );
 
     return NextResponse.json(result);
