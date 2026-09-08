@@ -1,4 +1,100 @@
--- Affiliate Content Automation: service-only persistence, queue worker primitives and audit history.
+-- Affiliate Content Automation: complete service-only database foundation.
+
+-- 0) Core automation tables. These CREATE IF NOT EXISTS statements also make
+-- this migration reproducible on a fresh project, because the first database
+-- bootstrap was initially created directly in Supabase before migrations existed.
+create table if not exists public.automation_rules (
+  id uuid primary key default gen_random_uuid(),
+  name text not null,
+  enabled boolean not null default true,
+  networks text[] not null default array['shopee']::text[],
+  channels text[] not null default array['telegram']::text[],
+  keyword text not null,
+  category text,
+  min_commission numeric,
+  min_discount numeric,
+  max_price numeric,
+  quantity smallint not null default 5,
+  sort text,
+  avoid_repeat_days smallint not null default 7,
+  schedule_cron text,
+  timezone text not null default 'America/Sao_Paulo',
+  dry_run boolean not null default true,
+  settings jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  constraint automation_rules_quantity_check check (quantity >= 1 and quantity <= 100),
+  constraint automation_rules_avoid_repeat_days_check check (avoid_repeat_days >= 0 and avoid_repeat_days <= 365),
+  constraint automation_rules_sort_check check (sort is null or sort in ('commission', 'price', 'sales', 'discount'))
+);
+
+create table if not exists public.automation_runs (
+  id uuid primary key default gen_random_uuid(),
+  rule_id uuid references public.automation_rules(id) on delete set null,
+  trigger_source text not null default 'manual',
+  status text not null default 'running',
+  dry_run boolean not null default true,
+  requested_count integer not null default 0,
+  selected_count integer not null default 0,
+  queued_count integer not null default 0,
+  published_count integer not null default 0,
+  skipped_count integer not null default 0,
+  failed_count integer not null default 0,
+  error_message text,
+  metadata jsonb not null default '{}'::jsonb,
+  started_at timestamptz not null default now(),
+  finished_at timestamptz,
+  created_at timestamptz not null default now(),
+  constraint automation_runs_trigger_source_check check (trigger_source in ('manual', 'scheduler', 'api', 'test')),
+  constraint automation_runs_status_check check (status in ('running', 'completed', 'partial', 'failed', 'cancelled'))
+);
+
+create index if not exists automation_runs_rule_started_idx
+  on public.automation_runs (rule_id, started_at desc);
+create index if not exists automation_runs_status_started_idx
+  on public.automation_runs (status, started_at desc);
+
+create table if not exists public.publication_queue (
+  id uuid primary key default gen_random_uuid(),
+  run_id uuid references public.automation_runs(id) on delete set null,
+  rule_id uuid references public.automation_rules(id) on delete set null,
+  offer_key text not null,
+  network text not null,
+  offer_id text not null,
+  channel text not null,
+  status text not null default 'pending',
+  priority smallint not null default 100,
+  scheduled_for timestamptz not null default now(),
+  available_at timestamptz not null default now(),
+  attempts smallint not null default 0,
+  max_attempts smallint not null default 3,
+  locked_at timestamptz,
+  locked_by text,
+  content jsonb not null default '{}'::jsonb,
+  offer_snapshot jsonb not null default '{}'::jsonb,
+  external_id text,
+  last_error text,
+  published_at timestamptz,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  constraint publication_queue_attempts_check check (attempts >= 0),
+  constraint publication_queue_max_attempts_check check (max_attempts >= 1 and max_attempts <= 20),
+  constraint publication_queue_status_check check (status in (
+    'pending', 'processing', 'retry', 'published', 'failed', 'skipped_duplicate', 'cancelled'
+  ))
+);
+
+create index if not exists publication_queue_locked_idx
+  on public.publication_queue (locked_at)
+  where status = 'processing';
+create index if not exists publication_queue_run_idx
+  on public.publication_queue (run_id, created_at desc);
+create unique index if not exists publication_queue_run_offer_channel_unique
+  on public.publication_queue (run_id, offer_key, channel)
+  where run_id is not null;
+create index if not exists publication_queue_worker_idx
+  on public.publication_queue (status, available_at, priority, scheduled_for)
+  where status in ('pending', 'retry');
 
 -- 1) Persistent publication history used by the current deduplication engine.
 create table if not exists public.published_offers (
@@ -29,15 +125,13 @@ alter table public.published_offers
 create unique index if not exists published_offers_source_queue_unique
   on public.published_offers (source_queue_id)
   where source_queue_id is not null;
-
 create index if not exists published_offers_dedupe_idx
   on public.published_offers (offer_key, channel, published_at desc);
-
 create index if not exists published_offers_offer_idx
   on public.published_offers (network, offer_id, published_at desc);
 
--- IMPORTANT: offer_key + channel is intentionally NOT unique.
--- The same offer may be republished after avoid_repeat_days; history must keep every publication.
+-- offer_key + channel is intentionally NOT unique. The same offer may be
+-- republished after avoid_repeat_days and every publication must remain in history.
 
 -- 2) Publication audit log.
 create table if not exists public.publication_logs (
@@ -54,7 +148,6 @@ create table if not exists public.publication_logs (
 
 create index if not exists publication_logs_queue_created_idx
   on public.publication_logs (queue_id, created_at desc);
-
 create index if not exists publication_logs_run_created_idx
   on public.publication_logs (run_id, created_at desc);
 
@@ -65,15 +158,13 @@ alter table public.publication_queue
 create unique index if not exists publication_queue_idempotency_unique
   on public.publication_queue (idempotency_key)
   where idempotency_key is not null;
-
 create index if not exists publication_queue_rule_status_idx
   on public.publication_queue (rule_id, status, scheduled_for desc);
-
 create index if not exists automation_rules_enabled_idx
   on public.automation_rules (enabled)
   where enabled = true;
 
--- 4) Validation constraints.
+-- 4) Validation constraints that were not part of the initial bootstrap.
 do $$
 begin
   if not exists (select 1 from pg_constraint where conname = 'automation_rules_min_commission_check') then
