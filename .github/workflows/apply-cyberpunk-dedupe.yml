@@ -1,0 +1,33 @@
+name: One-time cyberpunk and smart dedupe
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  upgrade:
+    if: github.event.head_commit.message == 'Executa tema cyberpunk e dedupe inteligente'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Apply cyberpunk theme and smart dedupe
+        run: python scripts/apply_cyberpunk_dedupe.py
+      - name: Validate
+        run: |
+          npm install --ignore-scripts --no-audit --no-fund
+          npm run check
+      - name: Commit upgrade
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add lib/offer-engine.ts lib/search-engine.ts src/automation.ts src/admin.ts
+          git commit -m "Aplica tema cyberpunk e evita produtos equivalentes"
+          git push
