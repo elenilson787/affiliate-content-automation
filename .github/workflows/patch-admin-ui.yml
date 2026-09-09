@@ -1,0 +1,58 @@
+name: One-time admin UI patch
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.event.head_commit.message == 'Patch admin UI safeguards'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Patch admin UI
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('src/admin.ts')
+          s = p.read_text()
+
+          old = "async function refresh(){document.getElementById('workerState').textContent='Atualizando…';try{state.data=await api('/api/admin/dashboard');render();document.getElementById('workerState').textContent='Online';document.getElementById('pageSub').textContent=titles[state.view][1]+' · atualizado '+fmt(state.data.generatedAt);}catch(e){document.getElementById('workerState').textContent='Erro';if(e.message!=='UNAUTHORIZED')toast(e.message);}}"
+          new = "async function refresh(){document.getElementById('workerState').textContent='Atualizando…';try{state.data=await api('/api/admin/dashboard');render();document.getElementById('workerState').textContent='Online';document.getElementById('pageSub').textContent=titles[state.view][1]+' · atualizado '+fmt(state.data.generatedAt);}catch(e){document.getElementById('workerState').textContent='Erro';if(e.message!=='UNAUTHORIZED')toast(e.message);throw e;}}"
+          if s.count(old) != 1:
+              raise SystemExit('refresh replacement mismatch')
+          s = s.replace(old, new, 1)
+
+          old = "async function testRule(id){var r=id?ruleById(id):null;var p=r?{keyword:r.keyword,quantity:Math.min(r.quantity,5),minCommission:r.min_commission,minDiscount:r.min_discount,maxPrice:r.max_price}:formPayload();if(!p.keyword){toast('Informe uma palavra-chave.');return;}try{toast('Buscando ofertas…');var out=await api('/test',{method:'POST',body:JSON.stringify(p)});var first=out.publications&&out.publications[0]&&out.publications[0].offer?out.publications[0].offer.title:'';toast('Teste: '+out.selected+' selecionada(s), '+out.scanned+' analisadas. '+(first?first:''));}catch(e){toast(e.message);}}"
+          new = "async function testRule(id){var r=id?ruleById(id):null;var f=r?null:formPayload();var p=r?{keyword:r.keyword,quantity:Math.min(r.quantity,5),minCommission:r.min_commission,minDiscount:r.min_discount,maxPrice:r.max_price}:{keyword:f.keyword,quantity:Math.min(f.quantity,5),minCommission:f.min_commission,minDiscount:f.min_discount,maxPrice:f.max_price};if(!p.keyword){toast('Informe uma palavra-chave.');return;}try{toast('Buscando ofertas…');var out=await api('/test',{method:'POST',body:JSON.stringify(p)});var first=out.publications&&out.publications[0]&&out.publications[0].offer?out.publications[0].offer.title:'';toast('Teste: '+out.selected+' selecionada(s), '+out.scanned+' analisadas. '+(first?first:''));}catch(e){toast(e.message);}}"
+          if s.count(old) != 1:
+              raise SystemExit('test replacement mismatch')
+          s = s.replace(old, new, 1)
+
+          old = "function renderPublished(){var rows=state.data.published||[];var html=rows.length?rows.map(function(p){return '<tr><td><b>'+esc(p.offer_key)+'</b></td><td>'+esc(p.channel)+'</td><td>'+esc(p.external_id||'—')+'</td><td>'+esc(fmt(p.published_at))+'</td></tr>';}).join(''):'<tr><td colspan=\"4\" class=\"empty\">Nenhuma publicação.</td></tr>';document.getElementById('publishedBody').innerHTML=html;document.getElementById('dashboardPublished').innerHTML=rows.length?rows.slice(0,5).map(function(p){return '<tr><td><b>'+esc(p.offer_key)+'</b></td><td>'+esc(p.channel)+'</td><td>'+status('published')+'</td><td>'+esc(fmt(p.published_at))+'</td></tr>';}).join(''):'<tr><td colspan=\"4\" class=\"empty\">Nenhuma publicação recente.</td></tr>';}"
+          new = "function publishedProduct(p){var q=(state.data.queue||[]).find(function(x){return x.id===p.source_queue_id;});return q?product(q):'<b>'+esc(p.offer_key)+'</b>';}function renderPublished(){var rows=state.data.published||[];var html=rows.length?rows.map(function(p){return '<tr><td>'+publishedProduct(p)+'</td><td>'+esc(p.channel)+'</td><td>'+esc(p.external_id||'—')+'</td><td>'+esc(fmt(p.published_at))+'</td></tr>';}).join(''):'<tr><td colspan=\"4\" class=\"empty\">Nenhuma publicação.</td></tr>';document.getElementById('publishedBody').innerHTML=html;document.getElementById('dashboardPublished').innerHTML=rows.length?rows.slice(0,5).map(function(p){return '<tr><td>'+publishedProduct(p)+'</td><td>'+esc(p.channel)+'</td><td>'+status('published')+'</td><td>'+esc(fmt(p.published_at))+'</td></tr>';}).join(''):'<tr><td colspan=\"4\" class=\"empty\">Nenhuma publicação recente.</td></tr>';}"
+          if s.count(old) != 1:
+              raise SystemExit('published replacement mismatch')
+          s = s.replace(old, new, 1)
+
+          p.write_text(s)
+          PY
+      - name: Validate
+        run: |
+          npm install --ignore-scripts --no-audit --no-fund
+          npm run check
+      - name: Commit fix
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/admin.ts
+          git commit -m "Ajusta autenticação e teste do painel"
+          git push
