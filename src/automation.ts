@@ -175,7 +175,13 @@ async function searchOffers(
         sort: rule.sort || undefined,
       },
       targetQuantity,
-      { maxPages: 3, pageSize: 50, excludeOffer },
+      {
+        maxPages: 2,
+        pageSize: 50,
+        maxRequests: rule.settings.searchScope === "all" ? 10 : 8,
+        searchScope: rule.settings.searchScope === "all" ? "all" : "keyword",
+        excludeOffer,
+      },
     );
 
     selected.push(...result.selected);

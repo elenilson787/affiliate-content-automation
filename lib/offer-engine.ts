@@ -68,6 +68,9 @@ function keywordRequestsAccessory(keyword: string) {
 }
 
 export function offerLooksLikeAccessory(offer: Offer, keyword: string) {
+  // Em busca ampla não tratamos palavras como bolsa/capa/organizador como acessório,
+  // porque elas podem ser o próprio produto desejado.
+  if (!normalized(keyword)) return false;
   if (keywordRequestsAccessory(keyword)) return false;
   const title = normalized(offer.title);
 
@@ -139,13 +142,27 @@ export function discountPercent(offer: Offer) {
   return ((offer.originalPrice - offer.price) / offer.originalPrice) * 100;
 }
 
-export function offerIsRelevant(offer: Offer, keyword: string) {
-  const haystack = normalized(`${offer.title} ${offer.category || ""}`);
-  const terms = normalized(keyword).split(/\s+/).filter((term) => term.length >= 3);
+const SEARCH_STOP_WORDS = new Set([
+  "a", "as", "o", "os", "de", "da", "das", "do", "dos", "e", "em", "com", "para", "por", "um", "uma",
+  "no", "na", "nos", "nas", "ao", "aos", "se", "que", "pra",
+]);
 
-  if (terms.length > 0 && !terms.every((term) => haystack.includes(term))) return false;
+export function offerIsRelevant(offer: Offer, keyword: string) {
+  const normalizedKeyword = normalized(keyword);
+  if (!normalizedKeyword) return true;
   if (offerLooksLikeAccessory(offer, keyword)) return false;
-  return true;
+
+  const haystack = normalized(`${offer.title} ${offer.category || ""}`);
+  if (haystack.includes(normalizedKeyword)) return true;
+
+  const terms = normalizedKeyword
+    .split(/\s+/)
+    .filter((term) => term.length >= 2 && !SEARCH_STOP_WORDS.has(term));
+  if (!terms.length) return true;
+
+  const matches = terms.filter((term) => haystack.includes(term)).length;
+  const required = terms.length <= 2 ? terms.length : Math.max(2, Math.ceil(terms.length * 0.6));
+  return matches >= required;
 }
 
 export function offerHasTrustSignals(offer: Offer) {
@@ -174,6 +191,7 @@ export type OfferSelectionInput = {
   minCommission?: number;
   maxPrice?: number;
   minDiscount?: number;
+  sort?: "commission" | "price" | "sales" | "discount";
   limit?: number;
 };
 
@@ -189,6 +207,23 @@ export type OfferFilterDiagnostics = {
   zeroSalesAccepted: number;
   zeroRatingAccepted: number;
 };
+
+function compareOffers(a: Offer, b: Offer, sort: OfferSelectionInput["sort"]) {
+  const commissionA = Math.max(0, a.commissionPercent ?? 0);
+  const commissionB = Math.max(0, b.commissionPercent ?? 0);
+  const discountA = Math.max(0, a.discountPercent ?? discountPercent(a));
+  const discountB = Math.max(0, b.discountPercent ?? discountPercent(b));
+  const salesA = Math.max(0, offerSales(a) ?? 0);
+  const salesB = Math.max(0, offerSales(b) ?? 0);
+  const priceA = a.price ?? Number.POSITIVE_INFINITY;
+  const priceB = b.price ?? Number.POSITIVE_INFINITY;
+
+  if (sort === "commission") return commissionB - commissionA || discountB - discountA || salesB - salesA || rankOffer(b) - rankOffer(a);
+  if (sort === "discount") return discountB - discountA || commissionB - commissionA || salesB - salesA || rankOffer(b) - rankOffer(a);
+  if (sort === "sales") return salesB - salesA || commissionB - commissionA || discountB - discountA || rankOffer(b) - rankOffer(a);
+  if (sort === "price") return priceA - priceB || salesB - salesA || commissionB - commissionA || discountB - discountA;
+  return rankOffer(b) - rankOffer(a);
+}
 
 export function analyzeOffers(pool: Offer[], input: OfferSelectionInput) {
   const diagnostics: OfferFilterDiagnostics = {
@@ -222,7 +257,7 @@ export function analyzeOffers(pool: Offer[], input: OfferSelectionInput) {
     if (relevant && trusted && commissionOk && discountOk && priceOk) candidates.push(offer);
   }
 
-  candidates.sort((a, b) => rankOffer(b) - rankOffer(a));
+  candidates.sort((a, b) => compareOffers(a, b, input.sort));
 
   const seenOffers = new Set<string>();
   const seenProducts: Offer[] = [];

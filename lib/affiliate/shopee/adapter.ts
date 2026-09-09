@@ -80,7 +80,7 @@ export function createShopeeProvider(credentials: ShopeeCredentials): AffiliateP
         ? 5
         : request.sort === "price"
           ? 4
-          : request.sort === "sales"
+          : request.sort === "sales" || request.sort === "discount"
             ? 2
             : 1;
       const query = `{ productOfferV2(keyword: ${JSON.stringify(keyword)}, listType: 0, sortType: ${sortType}, page: ${page}, limit: ${limit}) { nodes { shopId itemId productName shopName imageUrl priceMin priceMax priceDiscountRate commissionRate sellerCommissionRate commission sales ratingStar productLink offerLink } } }`;
