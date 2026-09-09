@@ -97,17 +97,77 @@ function insidePublishWindow(date: Date, timezone: string, settings: Record<stri
   return start <= end ? current >= start && current <= end : current >= start || current <= end;
 }
 
-function intervalDueSlot(now: Date, timezone: string, settings: Record<string, unknown>, lastRunAt?: string | null) {
-  const interval = intervalMinutes(settings);
-  if (!interval) return null;
-  const slot = new Date(now);
-  slot.setUTCSeconds(0, 0);
-  if (!insidePublishWindow(slot, timezone, settings)) return null;
-  if (lastRunAt) {
-    const last = new Date(lastRunAt).getTime();
-    if (Number.isFinite(last) && slot.getTime() - last < interval * 60_000) return null;
+function nextValidPublicationSlot(start: Date, timezone: string, settings: Record<string, unknown>) {
+  let candidate = new Date(start);
+  candidate.setUTCSeconds(0, 0);
+  const remainder = candidate.getUTCMinutes() % 5;
+  if (remainder !== 0) candidate = new Date(candidate.getTime() + (5 - remainder) * 60_000);
+
+  // Procura a próxima janela válida por até 14 dias. Isso também cobre janelas
+  // que atravessam a meia-noite sem depender de conversões manuais de timezone.
+  for (let i = 0; i < 4_032; i += 1) {
+    if (insidePublishWindow(candidate, timezone, settings)) return candidate;
+    candidate = new Date(candidate.getTime() + 5 * 60_000);
   }
-  return slot;
+  throw new Error("NO_VALID_PUBLICATION_WINDOW");
+}
+
+async function hasActiveRuleQueue(db: SupabaseRest, ruleId: string) {
+  const rows = await db.select<{ id: string }>(
+    "publication_queue",
+    new URLSearchParams({
+      select: "id",
+      rule_id: eq(ruleId),
+      status: "in.(pending,processing,retry)",
+      limit: "1",
+    }),
+  );
+  return rows.length > 0;
+}
+
+async function latestRulePublishedAt(db: SupabaseRest, ruleId: string, channel?: string) {
+  const params = new URLSearchParams({
+    select: "published_at",
+    rule_id: eq(ruleId),
+    status: "eq.published",
+    order: "published_at.desc",
+    limit: "1",
+  });
+  if (channel) params.set("channel", eq(channel));
+  const rows = await db.select<{ published_at: string | null }>("publication_queue", params);
+  return rows[0]?.published_at || null;
+}
+
+async function buildPublicationSlots(
+  db: SupabaseRest,
+  rule: AutomationRuleRow,
+  slot: Date,
+  count: number,
+) {
+  const interval = intervalMinutes(rule.settings);
+  if (!interval) return Array.from({ length: count }, () => new Date(slot));
+
+  const timezone = rule.timezone || "America/Sao_Paulo";
+  const lastPublishedAt = await latestRulePublishedAt(db, rule.id);
+  let firstCandidate = new Date(slot);
+  if (lastPublishedAt) {
+    const earliest = new Date(lastPublishedAt).getTime() + interval * 60_000;
+    if (Number.isFinite(earliest) && earliest > firstCandidate.getTime()) firstCandidate = new Date(earliest);
+  }
+
+  const slots: Date[] = [];
+  let current = nextValidPublicationSlot(firstCandidate, timezone, rule.settings);
+  for (let index = 0; index < count; index += 1) {
+    if (index > 0) {
+      current = nextValidPublicationSlot(
+        new Date(current.getTime() + interval * 60_000),
+        timezone,
+        rule.settings,
+      );
+    }
+    slots.push(new Date(current));
+  }
+  return slots;
 }
 
 type RecentPublishedQueue = {
@@ -209,7 +269,6 @@ async function searchOffers(
 async function executeRule(db: SupabaseRest, env: Env, rule: AutomationRuleRow, slot: Date, triggerSource: "scheduler" | "manual" = "scheduler"): Promise<RuleExecutionResult> {
   const slotIso = slot.toISOString();
   const runId = triggerSource === "scheduler" ? await stableUuid(`scheduler:${rule.id}:${slotIso}`) : crypto.randomUUID();
-  const nowIso = new Date().toISOString();
 
   const insertedRuns = await db.insert<{ id: string }>(
     "automation_runs",
@@ -281,6 +340,8 @@ async function executeRule(db: SupabaseRest, env: Env, rule: AutomationRuleRow, 
 
     const priority = numberSetting(rule.settings, "priority", 100, 0, 32_767);
     const maxAttempts = numberSetting(rule.settings, "maxAttempts", 3, 1, 20);
+    const configuredInterval = intervalMinutes(rule.settings);
+    const publicationSlots = await buildPublicationSlots(db, rule, slot, rule.quantity);
     const queueRows: QueueInsert[] = [];
     const selected: Offer[] = [];
     let dedupeCandidatesSkipped = excluded;
@@ -297,6 +358,8 @@ async function executeRule(db: SupabaseRest, env: Env, rule: AutomationRuleRow, 
         continue;
       }
 
+      const publicationIndex = selected.length;
+      const scheduledFor = publicationSlots[publicationIndex]?.toISOString() || slotIso;
       selected.push(offer);
       for (const { channel, duplicate } of channelStates) {
         const content = generateContent(offer, channel, contentOptions(rule.settings));
@@ -309,8 +372,8 @@ async function executeRule(db: SupabaseRest, env: Env, rule: AutomationRuleRow, 
           channel,
           status: duplicate ? "skipped_duplicate" : "pending",
           priority,
-          scheduled_for: nowIso,
-          available_at: nowIso,
+          scheduled_for: scheduledFor,
+          available_at: scheduledFor,
           max_attempts: maxAttempts,
           idempotency_key: `${runId}:${key}:${channel}`,
           content,
@@ -345,6 +408,9 @@ async function executeRule(db: SupabaseRest, env: Env, rule: AutomationRuleRow, 
         candidateTarget,
         searchCandidates: candidates.length,
         dedupeCandidatesSkipped,
+        publicationIntervalMinutes: configuredInterval,
+        firstScheduledFor: selected.length ? publicationSlots[0]?.toISOString() || null : null,
+        lastScheduledFor: selected.length ? publicationSlots[selected.length - 1]?.toISOString() || null : null,
       },
     });
 
@@ -375,6 +441,9 @@ export async function runRuleNow(env: Env, ruleId: string) {
     new URLSearchParams({ select: "*", id: eq(ruleId), limit: "1" }),
   );
   if (!rules.length) throw new Error("AUTOMATION_RULE_NOT_FOUND");
+  if (!rules[0].dry_run && await hasActiveRuleQueue(db, ruleId)) {
+    throw new Error("Esta automação já possui publicações pendentes. Aguarde a sequência atual terminar ou cancele a fila antes de executar novamente.");
+  }
   const execution = await executeRule(db, env, rules[0], new Date(), "manual");
   const worker = execution.status === "queued" ? await workerTick(env) : null;
   return { execution, worker };
@@ -389,12 +458,14 @@ export async function schedulerTick(env: Env, now = new Date()) {
     const timezone = rule.timezone || env.DEFAULT_TIMEZONE || "America/Sao_Paulo";
     let slot: Date | null = null;
 
+    // Uma regra nunca cria uma segunda sequência enquanto a anterior ainda tiver
+    // itens pendentes/processing/retry. Isso impede lotes concorrentes.
+    if (!rule.dry_run && await hasActiveRuleQueue(db, rule.id)) continue;
+
     if (intervalMinutes(rule.settings)) {
-      const lastRuns = await db.select<{ started_at: string }>(
-        "automation_runs",
-        new URLSearchParams({ select: "started_at", rule_id: eq(rule.id), order: "started_at.desc", limit: "1" }),
-      );
-      slot = intervalDueSlot(now, timezone, rule.settings, lastRuns[0]?.started_at);
+      const candidate = new Date(now);
+      candidate.setUTCSeconds(0, 0);
+      if (insidePublishWindow(candidate, timezone, rule.settings)) slot = candidate;
     } else if (rule.schedule_cron?.trim()) {
       slot = findDueSlot(rule.schedule_cron, now, timezone, SCHEDULER_LOOKBACK_MINUTES);
     }
@@ -456,8 +527,55 @@ function contentFromQueue(row: PublicationQueueRow): GeneratedContent {
   };
 }
 
+async function deferClaimIfTooSoon(db: SupabaseRest, workerId: string, row: PublicationQueueRow) {
+  if (!row.rule_id) return null;
+  const rules = await db.select<AutomationRuleRow>(
+    "automation_rules",
+    new URLSearchParams({ select: "*", id: eq(row.rule_id), limit: "1" }),
+  );
+  const rule = rules[0];
+  if (!rule) return null;
+  const interval = intervalMinutes(rule.settings);
+  if (!interval) return null;
+
+  const lastPublishedAt = await latestRulePublishedAt(db, rule.id, row.channel);
+  if (!lastPublishedAt) return null;
+  const earliestMs = new Date(lastPublishedAt).getTime() + interval * 60_000;
+  if (!Number.isFinite(earliestMs) || Date.now() >= earliestMs) return null;
+
+  const scheduled = nextValidPublicationSlot(
+    new Date(earliestMs),
+    rule.timezone || "America/Sao_Paulo",
+    rule.settings,
+  );
+  const scheduledIso = scheduled.toISOString();
+  const filters = new URLSearchParams({ id: eq(row.id), locked_by: eq(workerId) });
+  await db.update("publication_queue", filters, {
+    status: "pending",
+    scheduled_for: scheduledIso,
+    available_at: scheduledIso,
+    attempts: Math.max(0, Number(row.attempts || 0) - 1),
+    locked_at: null,
+    locked_by: null,
+  });
+  await db.insert("publication_logs", {
+    queue_id: row.id,
+    run_id: row.run_id,
+    rule_id: row.rule_id,
+    event: "interval_deferred",
+    status: "pending",
+    message: `Publicação adiada para respeitar intervalo de ${interval} minuto(s).`,
+    metadata: { intervalMinutes: interval, scheduledFor: scheduledIso },
+  }, "return=minimal");
+  return scheduledIso;
+}
+
 async function publishQueueItem(db: SupabaseRest, env: Env, workerId: string, row: PublicationQueueRow) {
   try {
+    const deferredUntil = await deferClaimIfTooSoon(db, workerId, row);
+    if (deferredUntil) {
+      return { id: row.id, runId: row.run_id, status: "deferred" as const, scheduledFor: deferredUntil };
+    }
     const content = contentFromQueue(row);
     if (row.channel !== "telegram") throw new Error(`PUBLISHER_NOT_CONFIGURED: ${row.channel}`);
 
