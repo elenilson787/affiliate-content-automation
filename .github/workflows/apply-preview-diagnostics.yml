@@ -1,0 +1,36 @@
+name: One-time preview diagnostics upgrade
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/apply-preview-diagnostics.yml
+
+permissions:
+  contents: write
+
+jobs:
+  upgrade:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Apply preview diagnostics upgrade
+        run: python scripts/fix_preview_diagnostics.py
+      - name: Install dependencies
+        run: npm install --ignore-scripts --no-audit --no-fund
+      - name: Validate
+        run: npm run check
+      - name: Commit upgrade
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/admin.ts
+          if git diff --cached --quiet; then
+            echo "No admin changes to commit"
+          else
+            git commit -m "Melhora diagnóstico da prévia de ofertas"
+            git push
+          fi
