@@ -178,7 +178,10 @@ export function operationalState(rule: AutomationRuleRow, now = new Date()): Rul
   const local = localDateParts(now, timezone);
   const startDate = text(settings.activeStartDate);
   const endDate = text(settings.activeEndDate);
-  if (endDate && local.dateKey > endDate) return "ended";
+  const startMinutes = clockMinutes(settings.windowStart, "09:00");
+  const endMinutes = clockMinutes(settings.windowEnd, "22:00");
+  const endedToday = Boolean(endDate && local.dateKey === endDate && startMinutes <= endMinutes && local.minutes > endMinutes);
+  if (endDate && (local.dateKey > endDate || endedToday)) return "ended";
   if (startDate && local.dateKey < startDate) return rule.enabled ? "scheduled" : "paused";
   if (!rule.enabled) return "paused";
   return "active";
