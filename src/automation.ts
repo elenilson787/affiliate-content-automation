@@ -72,7 +72,7 @@ async function updateRun(db: SupabaseRest, runId: string, patch: Record<string, 
   await db.update("automation_runs", new URLSearchParams({ id: eq(runId) }), patch);
 }
 
-async function searchOffers(env: Env, rule: AutomationRuleRow) {
+async function searchOffers(env: Env, rule: AutomationRuleRow, targetQuantity = rule.quantity) {
   const selected: Offer[] = [];
   const unsupportedNetworks: string[] = [];
   let scanned = 0;
@@ -99,7 +99,7 @@ async function searchOffers(env: Env, rule: AutomationRuleRow) {
         maxPrice: rule.max_price ?? undefined,
         sort: rule.sort || undefined,
       },
-      rule.quantity,
+      targetQuantity,
       { maxPages: 3, pageSize: 50 },
     );
 
@@ -108,7 +108,7 @@ async function searchOffers(env: Env, rule: AutomationRuleRow) {
     pages += result.pages;
   }
 
-  const uniqueSelected = Array.from(new Map(selected.map((offer) => [offerKey(offer), offer])).values()).slice(0, rule.quantity);
+  const uniqueSelected = Array.from(new Map(selected.map((offer) => [offerKey(offer), offer])).values()).slice(0, targetQuantity);
   return { selected: uniqueSelected, unsupportedNetworks, scanned, pages };
 }
 
@@ -141,9 +141,11 @@ async function executeRule(db: SupabaseRest, env: Env, rule: AutomationRuleRow, 
   }
 
   try {
-    const { selected, unsupportedNetworks, scanned, pages } = await searchOffers(env, rule);
+    const candidateTarget = rule.dry_run ? rule.quantity : Math.min(Math.max(rule.quantity * 10, 20), 50);
+    const { selected: candidates, unsupportedNetworks, scanned, pages } = await searchOffers(env, rule, candidateTarget);
 
     if (rule.dry_run) {
+      const selected = candidates.slice(0, rule.quantity);
       const preview = selected.slice(0, 20).flatMap((offer) =>
         rule.channels.slice(0, 5).map((channel) => ({
           offerKey: offerKey(offer),
@@ -176,15 +178,26 @@ async function executeRule(db: SupabaseRest, env: Env, rule: AutomationRuleRow, 
     const priority = numberSetting(rule.settings, "priority", 100, 0, 32_767);
     const maxAttempts = numberSetting(rule.settings, "maxAttempts", 3, 1, 20);
     const queueRows: QueueInsert[] = [];
-    let skipped = 0;
+    const selected: Offer[] = [];
+    let dedupeCandidatesSkipped = 0;
 
-    for (const offer of selected) {
+    for (const offer of candidates) {
       const key = offerKey(offer);
-      for (const channel of rule.channels) {
-        const duplicate = await wasPublishedRecently(db, key, channel, rule.avoid_repeat_days);
-        const content = generateContent(offer, channel);
-        if (duplicate) skipped += 1;
+      const channelStates = await Promise.all(
+        rule.channels.map(async (channel) => ({
+          channel,
+          duplicate: await wasPublishedRecently(db, key, channel, rule.avoid_repeat_days),
+        })),
+      );
 
+      if (channelStates.length > 0 && channelStates.every((state) => state.duplicate)) {
+        dedupeCandidatesSkipped += 1;
+        continue;
+      }
+
+      selected.push(offer);
+      for (const { channel, duplicate } of channelStates) {
+        const content = generateContent(offer, channel);
         queueRows.push({
           run_id: runId,
           rule_id: rule.id,
@@ -202,6 +215,8 @@ async function executeRule(db: SupabaseRest, env: Env, rule: AutomationRuleRow, 
           offer_snapshot: offer,
         });
       }
+
+      if (selected.length >= rule.quantity) break;
     }
 
     const insertedQueue = queueRows.length
@@ -224,6 +239,9 @@ async function executeRule(db: SupabaseRest, env: Env, rule: AutomationRuleRow, 
         unsupportedNetworks,
         searchScanned: scanned,
         searchPages: pages,
+        candidateTarget,
+        searchCandidates: candidates.length,
+        dedupeCandidatesSkipped,
       },
     });
 
@@ -234,7 +252,7 @@ async function executeRule(db: SupabaseRest, env: Env, rule: AutomationRuleRow, 
       status: queued > 0 ? "queued" : "dry_run",
       selected: selected.length,
       queued,
-      skipped: Math.max(skipped, insertedSkipped),
+      skipped: insertedSkipped + dedupeCandidatesSkipped,
     };
   } catch (error) {
     const errorMessage = message(error);
