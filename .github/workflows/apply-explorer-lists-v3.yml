@@ -1,0 +1,41 @@
+name: One-time explorer and smart lists integration v3
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/apply-explorer-lists-v3.yml
+
+permissions:
+  contents: write
+
+jobs:
+  integrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Fix patch helper and apply integration
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          p=Path('scripts/add_explorer_lists.py')
+          t=p.read_text()
+          t=re.sub(r"admin = replace_once\(\n    (?!admin,\n)", "admin = replace_once(\n    admin,\n    ", t)
+          p.write_text(t)
+          PY
+          python scripts/add_explorer_lists.py
+      - name: Install dependencies
+        run: npm install --ignore-scripts --no-audit --no-fund
+      - name: Validate
+        run: npm run check
+      - name: Commit integration
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/admin.ts src/automation.ts
+          git diff --cached --quiet || git commit -m "Implementa explorar ofertas e listas inteligentes"
+          git push
