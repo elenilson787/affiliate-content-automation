@@ -75,8 +75,61 @@ export function offerKey(offer: Offer) {
   return offer.id.startsWith(prefix) ? offer.id : `${prefix}${offer.id}`;
 }
 
+const PRODUCT_NOISE = new Set([
+  "de", "da", "do", "das", "dos", "e", "em", "para", "com", "sem", "por", "um", "uma",
+  "novo", "nova", "original", "oficial", "produto", "promocao", "oferta", "kit", "conjunto", "profissional",
+  "alta", "velocidade", "bivolt", "voltagem", "110v", "127v", "220v", "110", "127", "220",
+]);
+
+function identityTokens(title: string) {
+  return normalized(title)
+    .split(/\s+/)
+    .filter((token) => token.length >= 2 && !PRODUCT_NOISE.has(token));
+}
+
+function modelTokens(tokens: string[]) {
+  return tokens.filter((token) => /[a-z]/.test(token) && /\d/.test(token) && token.length >= 3);
+}
+
+function likelyBrand(tokens: string[]) {
+  const generic = new Set([
+    "escova", "secadora", "secador", "cabelo", "modeladora", "alisadora", "multifuncional", "rotativa",
+    "eletrica", "eletrico", "air", "styler", "dryer", "hair", "shark",
+  ]);
+  return tokens.find((token) => !generic.has(token) && !/^\d+$/.test(token)) || "";
+}
+
+function diceSimilarity(a: string[], b: string[]) {
+  if (!a.length || !b.length) return 0;
+  const left = new Set(a);
+  const right = new Set(b);
+  let intersection = 0;
+  for (const token of left) if (right.has(token)) intersection += 1;
+  return (2 * intersection) / (left.size + right.size);
+}
+
 export function productFingerprint(offer: Offer) {
-  return normalized(offer.title);
+  return Array.from(new Set(identityTokens(offer.title))).sort().join(" ");
+}
+
+export function productsLookEquivalent(a: Offer, b: Offer) {
+  const left = identityTokens(a.title);
+  const right = identityTokens(b.title);
+  if (!left.length || !right.length) return false;
+
+  const leftModels = modelTokens(left);
+  const rightModels = modelTokens(right);
+  if (leftModels.some((model) => rightModels.includes(model))) return true;
+
+  const similarity = diceSimilarity(left, right);
+  const leftBrand = likelyBrand(left);
+  const rightBrand = likelyBrand(right);
+  const sameBrand = Boolean(leftBrand && rightBrand && leftBrand === rightBrand);
+
+  // Títulos do mesmo item em lojas diferentes normalmente ficam acima de 0,80.
+  // Para a mesma marca/família, usamos limiar menor para evitar variantes quase idênticas
+  // (ex.: 5 em 1 vs 7 em 1) ocupando ciclos consecutivos.
+  return similarity >= 0.8 || (sameBrand && similarity >= 0.64);
 }
 
 export function discountPercent(offer: Offer) {
@@ -126,7 +179,7 @@ export function selectOffers(
   },
 ) {
   const seenOffers = new Set<string>();
-  const seenProducts = new Set<string>();
+  const seenProducts: Offer[] = [];
 
   return pool
     .filter((offer) => offerIsRelevant(offer, input.keyword))
@@ -137,10 +190,9 @@ export function selectOffers(
     .sort((a, b) => rankOffer(b) - rankOffer(a))
     .filter((offer) => {
       const key = offerKey(offer);
-      const product = productFingerprint(offer);
-      if (seenOffers.has(key) || seenProducts.has(product)) return false;
+      if (seenOffers.has(key) || seenProducts.some((existing) => productsLookEquivalent(existing, offer))) return false;
       seenOffers.add(key);
-      seenProducts.add(product);
+      seenProducts.push(offer);
       return true;
     })
     .slice(0, input.limit || 10);

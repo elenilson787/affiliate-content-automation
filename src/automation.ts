@@ -1,6 +1,6 @@
 import { createShopeeProvider } from "../lib/affiliate/shopee/adapter";
 import { generateContent, type ContentTemplate } from "../lib/content-engine";
-import { offerKey } from "../lib/offer-engine";
+import { offerKey, productsLookEquivalent } from "../lib/offer-engine";
 import { createTelegramPublisher } from "../lib/publishers/telegram";
 import { searchQualifiedOffers } from "../lib/search-engine";
 import type { GeneratedContent, Offer } from "../lib/types";
@@ -64,29 +64,49 @@ async function loadEnabledRules(db: SupabaseRest) {
   return db.select<AutomationRuleRow>("automation_rules", params);
 }
 
-async function wasPublishedRecently(db: SupabaseRest, key: string, channel: string, days: number) {
-  if (days <= 0) return false;
+type RecentPublishedQueue = {
+  offer_key: string;
+  channel: string;
+  offer_snapshot: Offer;
+  published_at: string | null;
+};
+
+async function loadRecentPublishedQueue(db: SupabaseRest, channels: string[], days: number) {
+  if (days <= 0 || channels.length === 0) return [] as RecentPublishedQueue[];
   const cutoff = new Date(Date.now() - days * 86_400_000).toISOString();
   const params = new URLSearchParams({
-    select: "id",
-    offer_key: eq(key),
-    channel: eq(channel),
+    select: "offer_key,channel,offer_snapshot,published_at",
+    status: "eq.published",
     published_at: `gte.${cutoff}`,
-    limit: "1",
+    order: "published_at.desc",
+    limit: "500",
   });
-  const rows = await db.select<{ id: number }>("published_offers", params);
-  return rows.length > 0;
+  return db.select<RecentPublishedQueue>("publication_queue", params);
+}
+
+function wasProductPublishedRecently(recent: RecentPublishedQueue[], offer: Offer, channel: string) {
+  const key = offerKey(offer);
+  return recent.some((row) =>
+    row.channel === channel &&
+    (row.offer_key === key || (row.offer_snapshot && productsLookEquivalent(offer, row.offer_snapshot)))
+  );
 }
 
 async function updateRun(db: SupabaseRest, runId: string, patch: Record<string, unknown>) {
   await db.update("automation_runs", new URLSearchParams({ id: eq(runId) }), patch);
 }
 
-async function searchOffers(env: Env, rule: AutomationRuleRow, targetQuantity = rule.quantity) {
+async function searchOffers(
+  env: Env,
+  rule: AutomationRuleRow,
+  targetQuantity = rule.quantity,
+  excludeOffer?: (offer: Offer) => boolean,
+) {
   const selected: Offer[] = [];
   const unsupportedNetworks: string[] = [];
   let scanned = 0;
   let pages = 0;
+  let excluded = 0;
 
   for (const network of rule.networks) {
     if (network !== "shopee") {
@@ -110,16 +130,21 @@ async function searchOffers(env: Env, rule: AutomationRuleRow, targetQuantity = 
         sort: rule.sort || undefined,
       },
       targetQuantity,
-      { maxPages: 3, pageSize: 50 },
+      { maxPages: 3, pageSize: 50, excludeOffer },
     );
 
     selected.push(...result.selected);
     scanned += result.scanned;
     pages += result.pages;
+    excluded += result.excluded;
   }
 
-  const uniqueSelected = Array.from(new Map(selected.map((offer) => [offerKey(offer), offer])).values()).slice(0, targetQuantity);
-  return { selected: uniqueSelected, unsupportedNetworks, scanned, pages };
+  const uniqueSelected: Offer[] = [];
+  for (const offer of selected) {
+    if (!uniqueSelected.some((existing) => productsLookEquivalent(existing, offer))) uniqueSelected.push(offer);
+    if (uniqueSelected.length >= targetQuantity) break;
+  }
+  return { selected: uniqueSelected, unsupportedNetworks, scanned, pages, excluded };
 }
 
 async function executeRule(db: SupabaseRest, env: Env, rule: AutomationRuleRow, slot: Date, triggerSource: "scheduler" | "manual" = "scheduler"): Promise<RuleExecutionResult> {
@@ -152,8 +177,16 @@ async function executeRule(db: SupabaseRest, env: Env, rule: AutomationRuleRow, 
   }
 
   try {
-    const candidateTarget = rule.dry_run ? rule.quantity : Math.min(Math.max(rule.quantity * 10, 20), 50);
-    const { selected: candidates, unsupportedNetworks, scanned, pages } = await searchOffers(env, rule, candidateTarget);
+    const recentPublished = rule.dry_run ? [] : await loadRecentPublishedQueue(db, rule.channels, rule.avoid_repeat_days);
+    const excludeOffer = rule.dry_run
+      ? undefined
+      : (offer: Offer) => rule.channels.length > 0 && rule.channels.every((channel) =>
+          wasProductPublishedRecently(recentPublished, offer, channel)
+        );
+    const candidateTarget = rule.quantity;
+    const { selected: candidates, unsupportedNetworks, scanned, pages, excluded } = await searchOffers(
+      env, rule, candidateTarget, excludeOffer,
+    );
 
     if (rule.dry_run) {
       const selected = candidates.slice(0, rule.quantity);
@@ -191,16 +224,14 @@ async function executeRule(db: SupabaseRest, env: Env, rule: AutomationRuleRow, 
     const maxAttempts = numberSetting(rule.settings, "maxAttempts", 3, 1, 20);
     const queueRows: QueueInsert[] = [];
     const selected: Offer[] = [];
-    let dedupeCandidatesSkipped = 0;
+    let dedupeCandidatesSkipped = excluded;
 
     for (const offer of candidates) {
       const key = offerKey(offer);
-      const channelStates = await Promise.all(
-        rule.channels.map(async (channel) => ({
-          channel,
-          duplicate: await wasPublishedRecently(db, key, channel, rule.avoid_repeat_days),
-        })),
-      );
+      const channelStates = rule.channels.map((channel) => ({
+        channel,
+        duplicate: wasProductPublishedRecently(recentPublished, offer, channel),
+      }));
 
       if (channelStates.length > 0 && channelStates.every((state) => state.duplicate)) {
         dedupeCandidatesSkipped += 1;
