@@ -21,7 +21,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
       - name: Apply backend patch
         run: python scripts/patch_final_automation.py
       - name: Apply admin patch
