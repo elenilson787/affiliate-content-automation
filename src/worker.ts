@@ -1,6 +1,7 @@
 import { createShopeeProvider } from "../lib/affiliate/shopee/adapter";
 import { generateContent } from "../lib/content-engine";
 import { searchQualifiedOffers } from "../lib/search-engine";
+import { adminPage, handleAdminApi } from "./admin";
 import { runFullTick, schedulerTick, workerTick } from "./automation";
 import { required, type Env } from "./env";
 
@@ -88,9 +89,27 @@ async function handleFetch(request: Request, env: Env) {
       service: "affiliate-content-automation",
       runtime: "cloudflare-workers",
       scheduler: "*/5 * * * *",
+      admin: "/admin",
       config: safeConfig(env),
       timestamp: new Date().toISOString(),
     });
+  }
+
+  if (request.method === "GET" && (url.pathname === "/admin" || url.pathname === "/admin/")) {
+    return adminPage();
+  }
+
+  if (url.pathname.startsWith("/api/admin/")) {
+    if (!authorized(request, env)) return json({ error: "UNAUTHORIZED" }, 401);
+    try {
+      return await handleAdminApi(request, env);
+    } catch (error) {
+      console.error("admin request failed", error);
+      return json({
+        error: "ADMIN_EXECUTION_FAILED",
+        message: error instanceof Error ? error.message : "Falha desconhecida",
+      }, 500);
+    }
   }
 
   if (!["/tick", "/scheduler", "/worker", "/test"].includes(url.pathname)) {
