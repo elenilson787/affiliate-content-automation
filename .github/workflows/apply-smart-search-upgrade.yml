@@ -19,7 +19,7 @@ jobs:
         with:
           node-version: 22
       - name: Apply smart search upgrade
-        run: python scripts/upgrade_search_like_afiliapulse.py
+        run: python scripts/apply_smart_search_v2.py
       - name: Install dependencies
         run: npm install --ignore-scripts --no-audit --no-fund
       - name: Validate
