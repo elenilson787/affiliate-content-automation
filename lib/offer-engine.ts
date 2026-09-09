@@ -33,9 +33,6 @@ const ACCESSORY_LEADS = [
   "resistencia",
 ];
 
-// Marcadores fortes de peça/acessório. Diferente de ACCESSORY_LEADS,
-// estes bloqueiam mesmo quando aparecem no meio do título, porque normalmente
-// indicam que o anúncio é de reposição e não do produto principal.
 const STRONG_ACCESSORY_MARKERS = [
   "peca de reposicao",
   "peca reposicao",
@@ -55,6 +52,14 @@ function sourceMetric(offer: Offer, key: string) {
   if (raw == null || raw === "") return undefined;
   const value = typeof raw === "number" ? raw : Number(raw);
   return Number.isFinite(value) ? value : undefined;
+}
+
+export function offerSales(offer: Offer) {
+  return sourceMetric(offer, "sales");
+}
+
+export function offerRating(offer: Offer) {
+  return sourceMetric(offer, "rating");
 }
 
 function keywordRequestsAccessory(keyword: string) {
@@ -126,9 +131,6 @@ export function productsLookEquivalent(a: Offer, b: Offer) {
   const rightBrand = likelyBrand(right);
   const sameBrand = Boolean(leftBrand && rightBrand && leftBrand === rightBrand);
 
-  // Títulos do mesmo item em lojas diferentes normalmente ficam acima de 0,80.
-  // Para a mesma marca/família, usamos limiar menor para evitar variantes quase idênticas
-  // (ex.: 5 em 1 vs 7 em 1) ocupando ciclos consecutivos.
   return similarity >= 0.8 || (sameBrand && similarity >= 0.64);
 }
 
@@ -141,59 +143,114 @@ export function offerIsRelevant(offer: Offer, keyword: string) {
   const haystack = normalized(`${offer.title} ${offer.category || ""}`);
   const terms = normalized(keyword).split(/\s+/).filter((term) => term.length >= 3);
 
-  // Em buscas compostas (ex.: "escova secadora"), todos os termos relevantes
-  // precisam aparecer. Isso reduz resultados semanticamente próximos, mas errados.
   if (terms.length > 0 && !terms.every((term) => haystack.includes(term))) return false;
   if (offerLooksLikeAccessory(offer, keyword)) return false;
   return true;
 }
 
 export function offerHasTrustSignals(offer: Offer) {
-  const sales = sourceMetric(offer, "sales");
-  const rating = sourceMetric(offer, "rating");
+  const sales = offerSales(offer);
+  const rating = offerRating(offer);
 
-  // Quando a rede fornece métricas explicitamente zeradas, tratamos a oferta
-  // como inadequada para publicação automática. Métrica ausente não bloqueia.
-  if (sales !== undefined && sales <= 0) return false;
-  if (rating !== undefined && rating <= 0) return false;
+  // Zero vendas e zero avaliação são válidos para anúncios novos.
+  // Só descartamos métricas claramente inválidas. Produtos novos continuam
+  // naturalmente abaixo no ranking porque não recebem bônus de vendas/avaliação.
+  if (sales !== undefined && sales < 0) return false;
+  if (rating !== undefined && (rating < 0 || rating > 5)) return false;
   return true;
 }
 
 export function rankOffer(offer: Offer) {
   const discount = offer.discountPercent ?? discountPercent(offer);
   const commission = Math.max(0, offer.commissionPercent ?? 0);
-  const sales = Math.max(0, sourceMetric(offer, "sales") ?? 0);
-  const rating = Math.max(0, Math.min(5, sourceMetric(offer, "rating") ?? 0));
+  const sales = Math.max(0, offerSales(offer) ?? 0);
+  const rating = Math.max(0, Math.min(5, offerRating(offer) ?? 0));
   const trustBonus = rating * 2 + Math.log10(sales + 1) * 3;
   return discount * 0.55 + commission * 0.35 + trustBonus;
 }
 
-export function selectOffers(
-  pool: Offer[],
-  input: {
-    keyword: string;
-    minCommission?: number;
-    maxPrice?: number;
-    minDiscount?: number;
-    limit?: number;
-  },
-) {
+export type OfferSelectionInput = {
+  keyword: string;
+  minCommission?: number;
+  maxPrice?: number;
+  minDiscount?: number;
+  limit?: number;
+};
+
+export type OfferFilterDiagnostics = {
+  scanned: number;
+  rejectedRelevance: number;
+  invalidMetrics: number;
+  belowCommission: number;
+  belowDiscount: number;
+  aboveMaxPrice: number;
+  equivalentDuplicates: number;
+  eligible: number;
+  zeroSalesAccepted: number;
+  zeroRatingAccepted: number;
+};
+
+export function analyzeOffers(pool: Offer[], input: OfferSelectionInput) {
+  const diagnostics: OfferFilterDiagnostics = {
+    scanned: pool.length,
+    rejectedRelevance: 0,
+    invalidMetrics: 0,
+    belowCommission: 0,
+    belowDiscount: 0,
+    aboveMaxPrice: 0,
+    equivalentDuplicates: 0,
+    eligible: 0,
+    zeroSalesAccepted: 0,
+    zeroRatingAccepted: 0,
+  };
+
+  const candidates: Offer[] = [];
+
+  for (const offer of pool) {
+    const relevant = offerIsRelevant(offer, input.keyword);
+    const trusted = offerHasTrustSignals(offer);
+    const commissionOk = input.minCommission == null || (offer.commissionPercent ?? 0) >= input.minCommission;
+    const discountOk = input.minDiscount == null || (offer.discountPercent ?? discountPercent(offer)) >= input.minDiscount;
+    const priceOk = input.maxPrice == null || offer.price == null || offer.price <= input.maxPrice;
+
+    if (!relevant) diagnostics.rejectedRelevance += 1;
+    if (!trusted) diagnostics.invalidMetrics += 1;
+    if (!commissionOk) diagnostics.belowCommission += 1;
+    if (!discountOk) diagnostics.belowDiscount += 1;
+    if (!priceOk) diagnostics.aboveMaxPrice += 1;
+
+    if (relevant && trusted && commissionOk && discountOk && priceOk) candidates.push(offer);
+  }
+
+  candidates.sort((a, b) => rankOffer(b) - rankOffer(a));
+
   const seenOffers = new Set<string>();
   const seenProducts: Offer[] = [];
+  const unique: Offer[] = [];
 
-  return pool
-    .filter((offer) => offerIsRelevant(offer, input.keyword))
-    .filter(offerHasTrustSignals)
-    .filter((offer) => input.minCommission == null || (offer.commissionPercent ?? 0) >= input.minCommission)
-    .filter((offer) => input.maxPrice == null || offer.price == null || offer.price <= input.maxPrice)
-    .filter((offer) => input.minDiscount == null || (offer.discountPercent ?? discountPercent(offer)) >= input.minDiscount)
-    .sort((a, b) => rankOffer(b) - rankOffer(a))
-    .filter((offer) => {
-      const key = offerKey(offer);
-      if (seenOffers.has(key) || seenProducts.some((existing) => productsLookEquivalent(existing, offer))) return false;
-      seenOffers.add(key);
-      seenProducts.push(offer);
-      return true;
-    })
-    .slice(0, input.limit || 10);
+  for (const offer of candidates) {
+    const key = offerKey(offer);
+    if (seenOffers.has(key) || seenProducts.some((existing) => productsLookEquivalent(existing, offer))) {
+      diagnostics.equivalentDuplicates += 1;
+      continue;
+    }
+
+    seenOffers.add(key);
+    seenProducts.push(offer);
+    unique.push(offer);
+
+    if (offerSales(offer) === 0) diagnostics.zeroSalesAccepted += 1;
+    if (offerRating(offer) === 0) diagnostics.zeroRatingAccepted += 1;
+  }
+
+  diagnostics.eligible = unique.length;
+
+  return {
+    selected: unique.slice(0, input.limit || 10),
+    diagnostics,
+  };
+}
+
+export function selectOffers(pool: Offer[], input: OfferSelectionInput) {
+  return analyzeOffers(pool, input).selected;
 }
