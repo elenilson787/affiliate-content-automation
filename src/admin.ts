@@ -17,7 +17,10 @@ function json(data: unknown, status = 200) {
 function text(value: unknown, max = 160) { return typeof value === "string" ? value.trim().slice(0, max) : undefined; }
 function nullableNumber(value: unknown, min: number, max: number) {
   if (value === null || value === "") return null;
-  const n = Number(value);
+  const normalized = typeof value === "string"
+    ? (value.includes(",") ? value.trim().replace(/\./g, "").replace(",", ".") : value.trim())
+    : value;
+  const n = Number(normalized);
   return Number.isFinite(n) && n >= min && n <= max ? n : undefined;
 }
 function validTemplate(value: unknown): ContentTemplate {
@@ -134,15 +137,46 @@ async function telegramInfo(env: Env) {
   return {configured:true,botUsername:me?.username||null,botName:me?.first_name||null,chatTitle:chat?.title||chat?.username||"Grupo Telegram",isForum:Boolean(chat?.is_forum),chatType:chat?.type||null,topics};
 }
 
+function buildPreviewSuggestions(
+  diagnostics: { [key: string]: number },
+  filters: { minCommission?: number | null; minDiscount?: number | null; maxPrice?: number | null },
+) {
+  if (!diagnostics.scanned) return ["A Shopee não retornou itens para essa palavra-chave. Tente um termo mais comum ou mais curto."];
+
+  const candidates = [
+    { count: diagnostics.rejectedRelevance || 0, text: "Muitos itens não correspondem exatamente à palavra-chave. Tente um termo um pouco mais amplo." },
+    { count: diagnostics.belowCommission || 0, text: filters.minCommission != null ? `Reduza a comissão mínima de ${filters.minCommission}% ou deixe esse filtro vazio.` : "Revise a comissão mínima." },
+    { count: diagnostics.belowDiscount || 0, text: filters.minDiscount != null ? `Reduza o desconto mínimo de ${filters.minDiscount}% ou deixe esse filtro vazio.` : "Revise o desconto mínimo." },
+    { count: diagnostics.aboveMaxPrice || 0, text: filters.maxPrice != null ? `Aumente o preço máximo de R$ ${filters.maxPrice.toFixed(2).replace(".", ",")} ou deixe esse filtro vazio.` : "Revise o preço máximo." },
+    { count: diagnostics.equivalentDuplicates || 0, text: "Há anúncios equivalentes entre os resultados; amplie a busca para encontrar produtos realmente diferentes." },
+    { count: diagnostics.invalidMetrics || 0, text: "Alguns anúncios vieram com métricas inválidas da rede e foram descartados por segurança." },
+  ].filter((item) => item.count > 0).sort((a, b) => b.count - a.count);
+
+  return candidates.slice(0, 3).map((item) => item.text);
+}
+
 async function preview(request: Request, env: Env) {
   const body=await request.json().catch(()=>({})) as JsonObject; const db=new SupabaseRest(env); let rule:AutomationRuleRow|undefined;
   if(typeof body.ruleId==="string") { const rows=await db.select<AutomationRuleRow>("automation_rules",new URLSearchParams({select:"*",id:eq(body.ruleId),limit:"1"})); rule=rows[0]; }
   const keyword=rule?.keyword||text(body.keyword,120)||""; if(!keyword) return json({error:"Informe a palavra-chave."},400);
   const quantity=Math.min(Math.max(Number(rule?.quantity||body.quantity||3),1),5); const settings=(rule?.settings||body.settings||{}) as JsonObject;
+  const minCommission=rule?.min_commission??nullableNumber(body.minCommission,0,100)??undefined;
+  const minDiscount=rule?.min_discount??nullableNumber(body.minDiscount,0,100)??undefined;
+  const maxPrice=rule?.max_price??nullableNumber(body.maxPrice,0,1_000_000)??undefined;
   const provider=createShopeeProvider({appId:required(env.SHOPEE_APP_ID,"SHOPEE_APP_ID"),secret:required(env.SHOPEE_SECRET,"SHOPEE_SECRET")});
-  const result=await searchQualifiedOffers(provider,{keyword,minCommission:rule?.min_commission??nullableNumber(body.minCommission,0,100)??undefined,minDiscount:rule?.min_discount??nullableNumber(body.minDiscount,0,100)??undefined,maxPrice:rule?.max_price??nullableNumber(body.maxPrice,0,1_000_000)??undefined,sort:rule?.sort||undefined},quantity,{maxPages:3,pageSize:50});
+  const result=await searchQualifiedOffers(provider,{keyword,minCommission,minDiscount,maxPrice,sort:rule?.sort||undefined},quantity,{maxPages:3,pageSize:50});
   const template=validTemplate(settings.contentTemplate); const thread=Number(settings.telegramThreadId); const messageThreadId=Number.isInteger(thread)&&thread>0?thread:undefined;
-  return json({dryRun:true,selected:result.selected.length,scanned:result.scanned,pages:result.pages,publications:result.selected.map(offer=>({offer,content:generateContent(offer,"telegram",{template,messageThreadId})}))});
+  const filters={minCommission:minCommission??null,minDiscount:minDiscount??null,maxPrice:maxPrice??null};
+  return json({
+    dryRun:true,
+    selected:result.selected.length,
+    scanned:result.scanned,
+    pages:result.pages,
+    diagnostics:result.diagnostics,
+    filters,
+    suggestions:buildPreviewSuggestions(result.diagnostics,filters),
+    publications:result.selected.map(offer=>({offer,content:generateContent(offer,"telegram",{template,messageThreadId})})),
+  });
 }
 
 export async function handleAdminApi(request: Request, env: Env) {
@@ -235,6 +269,8 @@ body:before{content:"";position:fixed;inset:0;pointer-events:none;opacity:.22;ba
 .field input[type=time]{color-scheme:dark}
 #telegramTopic,#intervalMinutes{background:#071127;color:#eef3ff;border-color:#29416e}
 @media(max-width:700px){.live-preview-grid{grid-template-columns:1fr}.live-preview-grid img{width:100%;height:190px}.topic-custom{grid-template-columns:1fr}}
+
+.preview-diagnostics{display:grid;gap:10px;color:#dce5fb}.preview-diagnostics-head{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}.preview-diagnostics-head b{font-size:13px;color:#f5f7ff}.preview-diagnostics-head span{font-size:11px;color:#8290b2}.diag-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px}.diag-row{display:flex;justify-content:space-between;gap:12px;padding:8px 10px;border:1px solid rgba(59,82,139,.55);border-radius:9px;background:rgba(5,13,31,.55);font-size:11px}.diag-row span{color:#8f9bbc}.diag-row strong{color:#eef3ff}.diag-row.good strong{color:#28e8a0}.diag-row.warn strong{color:#ffca6a}.diag-note{font-size:10px;color:#7180a4}.diag-suggestions{border-top:1px solid rgba(59,82,139,.45);padding-top:9px}.diag-suggestions b{font-size:11px;color:#bcb7ff}.diag-suggestions ul{margin:6px 0 0 17px;padding:0;color:#9ba8c8;font-size:11px;line-height:1.55}.preview-summary{margin-top:10px;padding-top:9px;border-top:1px solid rgba(59,82,139,.4);font-size:10px;color:#8190b1}.preview-summary .new-product{color:#25dba0}@media(max-width:700px){.diag-grid{grid-template-columns:1fr}}
 </style></head><body><div class="shell"><aside class="sidebar"><div class="brand"><div class="logo">A</div><div><h1>Affiliate Automation</h1><small>motor independente</small></div></div><nav class="nav"><button class="active" data-view="dashboard">▦ <span>Dashboard</span></button><button data-view="automations">⚙ <span>Automações</span></button><button data-view="queue">≡ <span>Fila</span></button><button data-view="published">↗ <span>Publicações</span></button><button data-view="logs">⌁ <span>Logs</span></button><button data-view="content">✦ <span>Conteúdo</span></button><button data-view="settings">◉ <span>Configurações</span></button></nav><div class="sidefoot"><div class="mini">Cloudflare Worker<br><b id="workerState">Conectando…</b></div></div></aside><main class="main"><header class="top"><div><h2 id="pageTitle">Dashboard</h2><p id="pageSub">Visão operacional da automação</p></div><div class="actions"><button class="btn" id="refreshBtn">Atualizar</button><button class="btn primary" id="newBtn">+ Nova automação</button></div></header>
 <section class="view active" id="view-dashboard"><div class="grid" id="metrics"></div><div class="section"><div class="section-head"><h3>Automações ativas</h3></div><div id="dashboardRules" class="rule-list"></div></div><div class="section"><div class="section-head"><h3>Publicações recentes</h3></div><div class="panel table-wrap"><table class="table"><thead><tr><th>Produto</th><th>Canal</th><th>Status</th><th>Horário</th></tr></thead><tbody id="dashboardPublished"></tbody></table></div></div></section>
 <section class="view" id="view-automations"><div class="view-head"><label class="check"><input id="showPaused" type="checkbox"> Mostrar pausadas</label></div><div id="rules" class="rule-list"></div></section>
@@ -264,7 +300,37 @@ body:before{content:"";position:fixed;inset:0;pointer-events:none;opacity:.22;ba
   async function refreshTopics(selectedId,selectedName){var sel=byId('telegramTopic');if(!sel)return;try{var info=await api('/api/admin/telegram');var topics=info.topics||[];var html='<option value="">Tópico Geral</option>';topics.forEach(function(t){html+='<option value="'+esc(t.id)+'">'+esc(t.name)+' · #'+esc(t.id)+'</option>'});html+='<option value="__custom__">+ Cadastrar / usar outro tópico</option>';sel.innerHTML=html;var sid=selectedId?String(selectedId):'';if(sid&&Array.from(sel.options).some(function(o){return o.value===sid})){sel.value=sid}else if(sid){sel.value='__custom__';if(byId('threadId'))byId('threadId').value=sid;if(byId('topicName'))byId('topicName').value=selectedName||''}else sel.value='';toggleCustomTopic()}catch(e){console.warn('topics',e)}}
   function inferLegacyInterval(cron){if(cron==='*/10 * * * *')return 10;if(cron==='*/15 * * * *')return 15;if(cron==='*/20 * * * *')return 20;if(cron==='*/30 * * * *')return 30;if(cron==='0 9-22 * * *')return 60;return 60}
   async function hydrate(ruleId){try{var data=await api('/api/admin/dashboard'),rule=ruleId?(data.rules||[]).find(function(r){return r.id===ruleId}):null,settings=rule&&rule.settings||{};if(byId('intervalMinutes'))byId('intervalMinutes').value=String(Number(settings.intervalMinutes)||inferLegacyInterval(rule&&rule.schedule_cron));if(byId('windowStart'))byId('windowStart').value=settings.windowStart||'09:00';if(byId('windowEnd'))byId('windowEnd').value=settings.windowEnd||'22:00';await refreshTopics(settings.telegramThreadId,settings.telegramTopicName);if(!rule){if(byId('threadId'))byId('threadId').value='';if(byId('topicName'))byId('topicName').value=''}setTimeout(function(){if(byId('keyword')&&byId('keyword').value.trim())refreshInlinePreview()},120)}catch(e){console.warn('hydrate',e)}}
-  async function refreshInlinePreview(){var card=byId('livePreviewCard'),keyword=byId('keyword');if(!card||!keyword||!keyword.value.trim())return;if(card.dataset.loading==='1')return;card.dataset.loading='1';card.innerHTML='<div class="live-preview-placeholder">Buscando uma oferta real e montando a prévia…</div>';try{var settings={contentTemplate:(byId('contentTemplate')&&byId('contentTemplate').value)||'offer',telegramThreadId:currentThread(),telegramTopicName:currentTopicName()};var payload={keyword:keyword.value.trim(),quantity:1,minCommission:byId('minCommission')&&byId('minCommission').value,minDiscount:byId('minDiscount')&&byId('minDiscount').value,maxPrice:byId('maxPrice')&&byId('maxPrice').value,settings:settings};var res=await api('/api/admin/preview',{method:'POST',body:JSON.stringify(payload)}),pub=res.publications&&res.publications[0];if(!pub){card.innerHTML='<div class="live-preview-placeholder">Nenhuma oferta passou pelos filtros atuais. Ajuste os filtros e tente novamente.</div>';return}var img=pub.offer&&pub.offer.imageUrl?'<img src="'+esc(pub.offer.imageUrl)+'" alt="Produto">':'<div style="width:120px;height:120px;border:1px solid #29416e;border-radius:12px"></div>',msg=[pub.content.title,pub.content.body,pub.content.cta].filter(Boolean).join('\n\n');card.innerHTML='<div class="live-preview-grid">'+img+'<div><div class="live-preview-meta"><span class="pill purple">'+esc((byId('contentTemplate')&&byId('contentTemplate').options[byId('contentTemplate').selectedIndex].text)||'Template')+'</span><span class="pill">'+esc(currentTopicName())+'</span></div><div class="live-preview-message">'+esc(msg)+'</div></div></div>'}catch(e){card.innerHTML='<div class="live-preview-placeholder">Não foi possível gerar a prévia: '+esc(e.message)+'</div>'}finally{card.dataset.loading='0'}}
+  function renderPreviewDiagnostics(res){
+    var d=res&&res.diagnostics||{},suggestions=res&&res.suggestions||[],scanned=Number(res&&res.scanned||d.scanned||0);
+    var rows=[
+      ['Não relacionados / acessórios',d.rejectedRelevance||0,''],
+      ['Abaixo da comissão mínima',d.belowCommission||0,'warn'],
+      ['Abaixo do desconto mínimo',d.belowDiscount||0,'warn'],
+      ['Acima do preço máximo',d.aboveMaxPrice||0,'warn'],
+      ['Anúncios equivalentes',d.equivalentDuplicates||0,''],
+      ['Métricas inválidas',d.invalidMetrics||0,''],
+      ['Elegíveis',d.eligible||0,'good']
+    ];
+    var html='<div class="preview-diagnostics"><div class="preview-diagnostics-head"><b>Nenhuma oferta elegível com a combinação atual</b><span>'+esc(scanned)+' analisadas · '+esc(res&&res.pages||0)+' página(s)</span></div><div class="diag-grid">';
+    rows.forEach(function(r){html+='<div class="diag-row '+r[2]+'"><span>'+esc(r[0])+'</span><strong>'+esc(r[1])+'</strong></div>'});
+    html+='</div><div class="diag-note">Os motivos são independentes: o mesmo anúncio pode deixar de atender a mais de um filtro.</div>';
+    if(suggestions.length){html+='<div class="diag-suggestions"><b>Sugestões para ampliar a busca</b><ul>';suggestions.forEach(function(x){html+='<li>'+esc(x)+'</li>'});html+='</ul></div>'}
+    html+='</div>';return html;
+  }
+  function previewDiagnosticSummary(res){var d=res&&res.diagnostics||{};var zero=Number(d.zeroSalesAccepted||0);return '<div class="preview-summary">'+esc(res&&res.scanned||0)+' analisadas · '+esc(d.eligible||0)+' elegíveis'+(zero? ' · <span class="new-product">'+esc(zero)+' com 0 vendas aceitas</span>':'')+'</div>'}
+  async function refreshInlinePreview(){
+    var card=byId('livePreviewCard'),keyword=byId('keyword');if(!card||!keyword||!keyword.value.trim())return;if(card.dataset.loading==='1')return;
+    card.dataset.loading='1';card.innerHTML='<div class="live-preview-placeholder">Buscando ofertas e analisando cada filtro…</div>';
+    try{
+      var settings={contentTemplate:(byId('contentTemplate')&&byId('contentTemplate').value)||'offer',telegramThreadId:currentThread(),telegramTopicName:currentTopicName()};
+      var payload={keyword:keyword.value.trim(),quantity:1,minCommission:byId('minCommission')&&byId('minCommission').value,minDiscount:byId('minDiscount')&&byId('minDiscount').value,maxPrice:byId('maxPrice')&&byId('maxPrice').value,settings:settings};
+      var res=await api('/api/admin/preview',{method:'POST',body:JSON.stringify(payload)}),pub=res.publications&&res.publications[0];
+      if(!pub){card.innerHTML=renderPreviewDiagnostics(res);return}
+      var img=pub.offer&&pub.offer.imageUrl?'<img src="'+esc(pub.offer.imageUrl)+'" alt="Produto">':'<div style="width:120px;height:120px;border:1px solid #29416e;border-radius:12px"></div>';
+      var msg=[pub.content.title,pub.content.body,pub.content.cta].filter(Boolean).join('\n\n');
+      card.innerHTML='<div class="live-preview-grid">'+img+'<div><div class="live-preview-meta"><span class="pill purple">'+esc((byId('contentTemplate')&&byId('contentTemplate').options[byId('contentTemplate').selectedIndex].text)||'Template')+'</span><span class="pill">'+esc(currentTopicName())+'</span></div><div class="live-preview-message">'+esc(msg)+'</div>'+previewDiagnosticSummary(res)+'</div></div>';
+    }catch(e){card.innerHTML='<div class="live-preview-placeholder">Não foi possível gerar a prévia: '+esc(e.message)+'</div>'}finally{card.dataset.loading='0'}
+  }
   function enrichRequest(input,init){var url=typeof input==='string'?input:(input&&input.url)||'';if(!init||!init.body||!/^\/api\/admin\/rules(?:\/[0-9a-f-]{36})?$/i.test(url))return init;try{var body=JSON.parse(String(init.body));body.schedule_cron='0 9-22 * * *';body.settings=Object.assign({},body.settings||{},{intervalMinutes:Number(byId('intervalMinutes')&&byId('intervalMinutes').value)||60,windowStart:(byId('windowStart')&&byId('windowStart').value)||'09:00',windowEnd:(byId('windowEnd')&&byId('windowEnd').value)||'22:00',telegramThreadId:currentThread(),telegramTopicName:currentThread()?currentTopicName():null});return Object.assign({},init,{body:JSON.stringify(body)})}catch(e){return init}}
   window.fetch=function(input,init){return nativeFetch(input,enrichRequest(input,init))};
   enhanceSchedule();enhanceTopic();enhancePreview();refreshTopics();
