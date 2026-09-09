@@ -64,6 +64,51 @@ async function loadEnabledRules(db: SupabaseRest) {
   return db.select<AutomationRuleRow>("automation_rules", params);
 }
 
+function intervalMinutes(settings: Record<string, unknown>) {
+  const value = Number(settings.intervalMinutes);
+  return Number.isInteger(value) && value >= 5 && value <= 1440 && value % 5 === 0 ? value : null;
+}
+
+function clockSetting(settings: Record<string, unknown>, key: string, fallback: string) {
+  const value = typeof settings[key] === "string" ? String(settings[key]) : fallback;
+  return /^([01]\d|2[0-3]):[0-5]\d$/.test(value) ? value : fallback;
+}
+
+function clockMinutes(value: string) {
+  const [hour, minute] = value.split(":").map(Number);
+  return hour * 60 + minute;
+}
+
+function localClockMinutes(date: Date, timezone: string) {
+  const parts = Object.fromEntries(new Intl.DateTimeFormat("en-US", {
+    timeZone: timezone,
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(date).map((part) => [part.type, part.value]));
+  return Number(parts.hour) * 60 + Number(parts.minute);
+}
+
+function insidePublishWindow(date: Date, timezone: string, settings: Record<string, unknown>) {
+  const start = clockMinutes(clockSetting(settings, "windowStart", "09:00"));
+  const end = clockMinutes(clockSetting(settings, "windowEnd", "22:00"));
+  const current = localClockMinutes(date, timezone);
+  return start <= end ? current >= start && current <= end : current >= start || current <= end;
+}
+
+function intervalDueSlot(now: Date, timezone: string, settings: Record<string, unknown>, lastRunAt?: string | null) {
+  const interval = intervalMinutes(settings);
+  if (!interval) return null;
+  const slot = new Date(now);
+  slot.setUTCSeconds(0, 0);
+  if (!insidePublishWindow(slot, timezone, settings)) return null;
+  if (lastRunAt) {
+    const last = new Date(lastRunAt).getTime();
+    if (Number.isFinite(last) && slot.getTime() - last < interval * 60_000) return null;
+  }
+  return slot;
+}
+
 type RecentPublishedQueue = {
   offer_key: string;
   channel: string;
@@ -327,9 +372,19 @@ export async function schedulerTick(env: Env, now = new Date()) {
   const results: RuleExecutionResult[] = [];
 
   for (const rule of rules) {
-    if (!rule.schedule_cron?.trim()) continue;
     const timezone = rule.timezone || env.DEFAULT_TIMEZONE || "America/Sao_Paulo";
-    const slot = findDueSlot(rule.schedule_cron, now, timezone, SCHEDULER_LOOKBACK_MINUTES);
+    let slot: Date | null = null;
+
+    if (intervalMinutes(rule.settings)) {
+      const lastRuns = await db.select<{ started_at: string }>(
+        "automation_runs",
+        new URLSearchParams({ select: "started_at", rule_id: eq(rule.id), order: "started_at.desc", limit: "1" }),
+      );
+      slot = intervalDueSlot(now, timezone, rule.settings, lastRuns[0]?.started_at);
+    } else if (rule.schedule_cron?.trim()) {
+      slot = findDueSlot(rule.schedule_cron, now, timezone, SCHEDULER_LOOKBACK_MINUTES);
+    }
+
     if (!slot) continue;
     results.push(await executeRule(db, env, rule, slot));
   }
