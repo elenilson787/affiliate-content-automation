@@ -7,6 +7,7 @@ import type { GeneratedContent, Offer } from "../lib/types";
 import { findDueSlot, stableUuid } from "./cron";
 import { SupabaseRest, eq, type AutomationRuleRow, type PublicationQueueRow } from "./db";
 import { boundedInt, required, type Env } from "./env";
+import type { OfferListRow } from "./catalog";
 
 const SCHEDULER_LOOKBACK_MINUTES = 5;
 
@@ -142,6 +143,7 @@ async function updateRun(db: SupabaseRest, runId: string, patch: Record<string, 
 }
 
 async function searchOffers(
+  db: SupabaseRest,
   env: Env,
   rule: AutomationRuleRow,
   targetQuantity = rule.quantity,
@@ -164,15 +166,21 @@ async function searchOffers(
       secret: required(env.SHOPEE_SECRET, "SHOPEE_SECRET"),
     });
 
+    const listId = typeof rule.settings.listId === "string" ? rule.settings.listId : "";
+    let sourceList: OfferListRow | undefined;
+    if (listId) {
+      const rows = await db.select<OfferListRow>("offer_lists", new URLSearchParams({ select: "*", id: eq(listId), enabled: "eq.true", limit: "1" }));
+      sourceList = rows[0];
+    }
     const result = await searchQualifiedOffers(
       provider,
       {
         keyword: "",
         category: rule.category || undefined,
-        minCommission: rule.min_commission ?? undefined,
-        minDiscount: rule.min_discount ?? undefined,
-        maxPrice: rule.max_price ?? undefined,
-        sort: rule.sort || undefined,
+        minCommission: sourceList?.min_commission ?? rule.min_commission ?? undefined,
+        minDiscount: sourceList?.min_discount ?? rule.min_discount ?? undefined,
+        maxPrice: sourceList?.max_price ?? rule.max_price ?? undefined,
+        sort: sourceList?.sort ?? rule.sort ?? undefined,
       },
       targetQuantity,
       {
@@ -236,7 +244,7 @@ async function executeRule(db: SupabaseRest, env: Env, rule: AutomationRuleRow, 
         );
     const candidateTarget = rule.quantity;
     const { selected: candidates, unsupportedNetworks, scanned, pages, excluded } = await searchOffers(
-      env, rule, candidateTarget, excludeOffer,
+      db, env, rule, candidateTarget, excludeOffer,
     );
 
     if (rule.dry_run) {
