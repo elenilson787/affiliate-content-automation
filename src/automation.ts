@@ -1,5 +1,5 @@
 import { createShopeeProvider } from "../lib/affiliate/shopee/adapter";
-import { generateContent } from "../lib/content-engine";
+import { generateContent, type ContentTemplate } from "../lib/content-engine";
 import { offerKey } from "../lib/offer-engine";
 import { createTelegramPublisher } from "../lib/publishers/telegram";
 import { searchQualifiedOffers } from "../lib/search-engine";
@@ -47,6 +47,16 @@ function numberSetting(settings: Record<string, unknown>, key: string, fallback:
 
 function message(error: unknown) {
   return error instanceof Error ? error.message : "UNKNOWN_ERROR";
+}
+
+function contentOptions(settings: Record<string, unknown>) {
+  const rawTemplate = typeof settings.contentTemplate === "string" ? settings.contentTemplate : "offer";
+  const template: ContentTemplate = ["offer", "natural", "storytelling", "no_price"].includes(rawTemplate)
+    ? rawTemplate as ContentTemplate
+    : "offer";
+  const threadRaw = Number(settings.telegramThreadId);
+  const messageThreadId = Number.isInteger(threadRaw) && threadRaw > 0 ? threadRaw : undefined;
+  return { template, messageThreadId };
 }
 
 async function loadEnabledRules(db: SupabaseRest) {
@@ -112,9 +122,9 @@ async function searchOffers(env: Env, rule: AutomationRuleRow, targetQuantity = 
   return { selected: uniqueSelected, unsupportedNetworks, scanned, pages };
 }
 
-async function executeRule(db: SupabaseRest, env: Env, rule: AutomationRuleRow, slot: Date): Promise<RuleExecutionResult> {
+async function executeRule(db: SupabaseRest, env: Env, rule: AutomationRuleRow, slot: Date, triggerSource: "scheduler" | "manual" = "scheduler"): Promise<RuleExecutionResult> {
   const slotIso = slot.toISOString();
-  const runId = await stableUuid(`scheduler:${rule.id}:${slotIso}`);
+  const runId = triggerSource === "scheduler" ? await stableUuid(`scheduler:${rule.id}:${slotIso}`) : crypto.randomUUID();
   const nowIso = new Date().toISOString();
 
   const insertedRuns = await db.insert<{ id: string }>(
@@ -122,7 +132,7 @@ async function executeRule(db: SupabaseRest, env: Env, rule: AutomationRuleRow, 
     {
       id: runId,
       rule_id: rule.id,
-      trigger_source: "scheduler",
+      trigger_source: triggerSource,
       status: "running",
       dry_run: rule.dry_run,
       requested_count: rule.quantity,
@@ -131,6 +141,7 @@ async function executeRule(db: SupabaseRest, env: Env, rule: AutomationRuleRow, 
         scheduleCron: rule.schedule_cron,
         scheduleSlot: slotIso,
         timezone: rule.timezone,
+        triggerSource,
       },
     },
     "resolution=ignore-duplicates,return=representation",
@@ -150,7 +161,7 @@ async function executeRule(db: SupabaseRest, env: Env, rule: AutomationRuleRow, 
         rule.channels.slice(0, 5).map((channel) => ({
           offerKey: offerKey(offer),
           channel,
-          content: generateContent(offer, channel),
+          content: generateContent(offer, channel, contentOptions(rule.settings)),
         })),
       );
 
@@ -165,6 +176,7 @@ async function executeRule(db: SupabaseRest, env: Env, rule: AutomationRuleRow, 
           scheduleCron: rule.schedule_cron,
           scheduleSlot: slotIso,
           timezone: rule.timezone,
+          triggerSource,
           unsupportedNetworks,
           searchScanned: scanned,
           searchPages: pages,
@@ -197,7 +209,7 @@ async function executeRule(db: SupabaseRest, env: Env, rule: AutomationRuleRow, 
 
       selected.push(offer);
       for (const { channel, duplicate } of channelStates) {
-        const content = generateContent(offer, channel);
+        const content = generateContent(offer, channel, contentOptions(rule.settings));
         queueRows.push({
           run_id: runId,
           rule_id: rule.id,
@@ -236,6 +248,7 @@ async function executeRule(db: SupabaseRest, env: Env, rule: AutomationRuleRow, 
         scheduleCron: rule.schedule_cron,
         scheduleSlot: slotIso,
         timezone: rule.timezone,
+        triggerSource,
         unsupportedNetworks,
         searchScanned: scanned,
         searchPages: pages,
@@ -263,6 +276,18 @@ async function executeRule(db: SupabaseRest, env: Env, rule: AutomationRuleRow, 
     }).catch(() => undefined);
     return { ruleId: rule.id, runId, slot: slotIso, status: "failed", error: errorMessage };
   }
+}
+
+export async function runRuleNow(env: Env, ruleId: string) {
+  const db = new SupabaseRest(env);
+  const rules = await db.select<AutomationRuleRow>(
+    "automation_rules",
+    new URLSearchParams({ select: "*", id: eq(ruleId), limit: "1" }),
+  );
+  if (!rules.length) throw new Error("AUTOMATION_RULE_NOT_FOUND");
+  const execution = await executeRule(db, env, rules[0], new Date(), "manual");
+  const worker = execution.status === "queued" ? await workerTick(env) : null;
+  return { execution, worker };
 }
 
 export async function schedulerTick(env: Env, now = new Date()) {
@@ -325,6 +350,9 @@ function contentFromQueue(row: PublicationQueueRow): GeneratedContent {
     cta: String(content.cta),
     affiliateUrl: String(content.affiliateUrl),
     imageUrl: content.imageUrl ? String(content.imageUrl) : undefined,
+    messageThreadId: Number.isInteger(Number(content.messageThreadId)) && Number(content.messageThreadId) > 0
+      ? Number(content.messageThreadId)
+      : undefined,
   };
 }
 

@@ -42,6 +42,7 @@ export type GeneratedContent = {
   cta: string;
   affiliateUrl: string;
   imageUrl?: string;
+  messageThreadId?: number;
 };
 
 export type Publisher = {

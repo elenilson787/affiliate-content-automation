@@ -25,11 +25,14 @@ export function createTelegramPublisher(input: { token: string; chatId: string }
     async publish(content: GeneratedContent) {
       const caption = `${content.body}\n\n${content.cta}`;
 
+      const thread = content.messageThreadId ? { message_thread_id: content.messageThreadId } : {};
+
       if (content.imageUrl) {
         const result = await telegramRequest<{ message_id: number }>(input.token, "sendPhoto", {
           chat_id: input.chatId,
           photo: content.imageUrl,
           caption: caption.slice(0, 1024),
+          ...thread,
         });
         return { externalId: String(result.message_id) };
       }
@@ -38,6 +41,7 @@ export function createTelegramPublisher(input: { token: string; chatId: string }
         chat_id: input.chatId,
         text: caption,
         disable_web_page_preview: false,
+        ...thread,
       });
       return { externalId: String(result.message_id) };
     },
