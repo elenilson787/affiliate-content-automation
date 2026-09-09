@@ -1,5 +1,5 @@
 import { createShopeeProvider } from "../lib/affiliate/shopee/adapter";
-import { discountPercent, offerKey, offerRating, offerSales } from "../lib/offer-engine";
+import { discountPercent, offerKey, offerRating, offerSales, productFingerprint } from "../lib/offer-engine";
 import { searchQualifiedOffers } from "../lib/search-engine";
 import type { Offer, SearchRequest } from "../lib/types";
 import { SupabaseRest, eq } from "./db";
@@ -159,12 +159,25 @@ function parseExploreFilters(body: JsonObject, defaults?: Partial<ExploreFilters
   };
 }
 
-export async function exploreOffers(env: Env, filters: ExploreFilters) {
+type ExploreOptions = {
+  startPage?: number;
+  pageSpan?: number;
+  maxRequests?: number;
+  excludeOfferKeys?: string[];
+  excludeFingerprints?: string[];
+};
+
+export async function exploreOffers(env: Env, filters: ExploreFilters, options: ExploreOptions = {}) {
   const provider = createShopeeProvider({
     appId: required(env.SHOPEE_APP_ID, "SHOPEE_APP_ID"),
     secret: required(env.SHOPEE_SECRET, "SHOPEE_SECRET"),
   });
-  const discoveryTarget = Math.min(Math.max(filters.limit * 3, 30), 100);
+  const startPage = Math.min(Math.max(Math.trunc(options.startPage ?? 1), 1), 500);
+  const pageSpan = Math.min(Math.max(Math.trunc(options.pageSpan ?? 1), 1), 5);
+  const maxRequests = Math.min(Math.max(Math.trunc(options.maxRequests ?? 8), 1), 30);
+  const excludedKeys = new Set((options.excludeOfferKeys || []).slice(0, 500));
+  const excludedFingerprints = new Set((options.excludeFingerprints || []).slice(0, 500));
+  const discoveryTarget = Math.min(Math.max(filters.limit * 4, 40), 100);
   const search = await searchQualifiedOffers(
     provider,
     {
@@ -175,7 +188,14 @@ export async function exploreOffers(env: Env, filters: ExploreFilters) {
       sort: presetSort(filters.preset, filters.sort),
     },
     discoveryTarget,
-    { maxPages: 2, pageSize: 50, maxRequests: 12, searchScope: "all" },
+    {
+      maxPages: pageSpan,
+      pageStart: startPage,
+      pageSize: 50,
+      maxRequests,
+      searchScope: "all",
+      excludeOffer: (offer) => excludedKeys.has(offerKey(offer)) || excludedFingerprints.has(productFingerprint(offer)),
+    },
   );
   let offers = search.selected.filter((offer) => {
     const price = offer.price ?? 0;
@@ -187,9 +207,12 @@ export async function exploreOffers(env: Env, filters: ExploreFilters) {
     return true;
   });
   offers = sortOffers(offers, filters.preset, filters.sort).slice(0, filters.limit);
+  const nextCursor = Math.min(501, startPage + pageSpan);
   return {
     offers: offers.map((offer) => ({
       offer,
+      key: offerKey(offer),
+      fingerprint: productFingerprint(offer),
       score: opportunityScore(offer, filters.preset),
       sales: metric(offer, "sales"),
       rating: metric(offer, "rating"),
@@ -201,6 +224,9 @@ export async function exploreOffers(env: Env, filters: ExploreFilters) {
     diagnostics: search.diagnostics,
     strategy: search.strategy,
     filters,
+    cursor: startPage,
+    nextCursor,
+    hasMore: nextCursor <= 500 && search.scanned > 0,
   };
 }
 
@@ -260,15 +286,54 @@ async function refreshList(db: SupabaseRest, env: Env, id: string) {
   const list = rows[0];
   if (!list) return json({ error: "Lista não encontrada." }, 404);
   if (list.list_type === "manual") return json({ error: "Lista manual não usa atualização inteligente." }, 409);
-  const result = await exploreOffers(env, listFilters(list));
-  const payload = result.offers.map(({ offer }) => ({
+
+  const existing = await db.select<OfferListItemRow>(
+    "offer_list_items",
+    new URLSearchParams({ select: "*", list_id: eq(id), order: "created_at.asc", limit: "500" }),
+  );
+  const targetSize = Math.min(Math.max(list.target_size || 1, 1), 100);
+  if (existing.length >= targetSize) {
+    return json({ ok: true, listId: id, refreshed: 0, totalItems: existing.length, targetSize, complete: true, exhausted: false });
+  }
+
+  const rules = (list.rules || {}) as JsonObject;
+  const startPage = Math.min(Math.max(Math.trunc(Number(rules.searchCursor) || 1), 1), 500);
+  const existingKeys = existing.map((item) => item.offer_key);
+  const existingFingerprints = existing
+    .map((item) => item.offer_snapshot ? productFingerprint(item.offer_snapshot) : "")
+    .filter(Boolean);
+  const remaining = targetSize - existing.length;
+  const filters = { ...listFilters(list), limit: Math.min(Math.max(remaining * 3, 24), 60) };
+  const result = await exploreOffers(env, filters, {
+    startPage,
+    pageSpan: 1,
+    maxRequests: 6,
+    excludeOfferKeys: existingKeys,
+    excludeFingerprints: existingFingerprints,
+  });
+
+  const seenKeys = new Set(existingKeys);
+  const seenFingerprints = new Set(existingFingerprints);
+  const fresh = result.offers
+    .map(({ offer }) => offer)
+    .filter((offer) => {
+      const key = offerKey(offer);
+      const fingerprint = productFingerprint(offer);
+      if (seenKeys.has(key) || seenFingerprints.has(fingerprint)) return false;
+      seenKeys.add(key);
+      seenFingerprints.add(fingerprint);
+      return true;
+    })
+    .slice(0, remaining);
+
+  const payload = fresh.map((offer) => ({
     id: crypto.randomUUID(),
     list_id: list.id,
     offer_key: offerKey(offer),
     network: offer.network,
     offer_id: offer.id,
     offer_snapshot: offer,
-    source: "smart",
+    source: "smart" as const,
     pinned: false,
   }));
   if (payload.length) {
@@ -278,8 +343,32 @@ async function refreshList(db: SupabaseRest, env: Env, id: string) {
       "resolution=merge-duplicates,return=representation",
     );
   }
-  await db.update("offer_lists", new URLSearchParams({ id: eq(id) }), { updated_at: new Date().toISOString() });
-  return json({ ok: true, list, refreshed: payload.length, result });
+
+  const totalItems = existing.length + payload.length;
+  const emptyWaves = payload.length ? 0 : Math.min(Math.max(Number(rules.searchEmptyWaves) || 0, 0) + 1, 99);
+  const exhausted = !result.hasMore || emptyWaves >= 5;
+  const nextRules: JsonObject = {
+    ...rules,
+    searchCursor: exhausted ? 1 : result.nextCursor,
+    searchEmptyWaves: exhausted ? 0 : emptyWaves,
+    lastRefreshAt: new Date().toISOString(),
+    lastSearchScanned: result.scanned,
+    lastSearchRequests: result.requests,
+  };
+  await db.update("offer_lists", new URLSearchParams({ id: eq(id) }), { rules: nextRules, updated_at: new Date().toISOString() });
+
+  return json({
+    ok: true,
+    listId: id,
+    refreshed: payload.length,
+    totalItems,
+    targetSize,
+    complete: totalItems >= targetSize,
+    exhausted,
+    nextCursor: result.nextCursor,
+    scanned: result.scanned,
+    requests: result.requests,
+  });
 }
 
 async function addItem(db: SupabaseRest, id: string, body: JsonObject) {
@@ -312,7 +401,10 @@ export async function handleCatalogAdminApi(request: Request, env: Env): Promise
   if (request.method === "POST" && path === "/api/admin/explore") {
     const body = await request.json().catch(() => ({})) as JsonObject;
     const filters = parseExploreFilters(body);
-    return json(await exploreOffers(env, filters));
+    const cursor = integerOrNull(body.cursor, 1, 500) ?? 1;
+    const excludeOfferKeys = Array.isArray(body.excludeOfferKeys) ? body.excludeOfferKeys.filter((v): v is string => typeof v === "string").slice(0, 500) : [];
+    const excludeFingerprints = Array.isArray(body.excludeFingerprints) ? body.excludeFingerprints.filter((v): v is string => typeof v === "string").slice(0, 500) : [];
+    return json(await exploreOffers(env, filters, { startPage: cursor, pageSpan: 1, maxRequests: 8, excludeOfferKeys, excludeFingerprints }));
   }
 
   if (request.method === "GET" && path === "/api/admin/lists") {

@@ -21,6 +21,7 @@ type SearchOptions = {
   maxPages?: number;
   pageSize?: number;
   maxRequests?: number;
+  pageStart?: number;
   searchScope?: SearchScope;
   excludeOffer?: (offer: Offer) => boolean;
 };
@@ -124,9 +125,10 @@ export async function searchQualifiedOffers(
 ): Promise<QualifiedSearchResult> {
   const target = Math.min(Math.max(Math.trunc(quantity), 1), 100);
   const pageSize = Math.min(Math.max(Math.trunc(options.pageSize ?? 50), 1), 50);
-  const maxPages = Math.min(Math.max(Math.trunc(options.maxPages ?? 2), 1), 5);
+  const maxPages = Math.min(Math.max(Math.trunc(options.maxPages ?? 2), 1), 20);
+  const pageStart = Math.min(Math.max(Math.trunc(options.pageStart ?? 1), 1), 500);
   const scope: SearchScope = options.searchScope === "all" ? "all" : "keyword";
-  const maxRequests = Math.min(Math.max(Math.trunc(options.maxRequests ?? (scope === "all" ? 10 : 8)), 1), 20);
+  const maxRequests = Math.min(Math.max(Math.trunc(options.maxRequests ?? (scope === "all" ? 10 : 8)), 1), 60);
   const queries = scope === "all" ? ALL_SCOPE_QUERIES : keywordVariants(request.keyword);
   const sorts = sourceSorts(request.sort);
   const pool: Offer[] = [];
@@ -155,7 +157,7 @@ export async function searchQualifiedOffers(
   outer:
   for (const query of queries) {
     for (const sort of sorts) {
-      await runRequest(query, sort, 1);
+      await runRequest(query, sort, pageStart);
       const minimumDiscovery = target <= 5 ? 2 : 3;
       if (selected.length >= target && requests >= minimumDiscovery) break outer;
       if (requests >= maxRequests) break outer;
@@ -164,7 +166,8 @@ export async function searchQualifiedOffers(
 
   if (selected.length < target && requests < maxRequests) {
     const primaryQuery = queries[0] || "";
-    for (let page = 2; page <= maxPages && requests < maxRequests; page += 1) {
+    const lastPage = Math.min(500, pageStart + maxPages - 1);
+    for (let page = pageStart + 1; page <= lastPage && requests < maxRequests; page += 1) {
       for (const sort of sorts.slice(0, 3)) {
         const full = await runRequest(primaryQuery, sort, page);
         if (selected.length >= target || requests >= maxRequests) break;
