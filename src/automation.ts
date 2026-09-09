@@ -167,7 +167,7 @@ async function searchOffers(
     const result = await searchQualifiedOffers(
       provider,
       {
-        keyword: rule.keyword,
+        keyword: "",
         category: rule.category || undefined,
         minCommission: rule.min_commission ?? undefined,
         minDiscount: rule.min_discount ?? undefined,
@@ -178,8 +178,8 @@ async function searchOffers(
       {
         maxPages: 2,
         pageSize: 50,
-        maxRequests: rule.settings.searchScope === "all" ? 10 : 8,
-        searchScope: rule.settings.searchScope === "all" ? "all" : "keyword",
+        maxRequests: 10,
+        searchScope: "all",
         excludeOffer,
       },
     );
