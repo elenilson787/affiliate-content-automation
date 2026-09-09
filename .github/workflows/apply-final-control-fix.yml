@@ -1,0 +1,35 @@
+name: Apply final control fix
+
+on:
+  push:
+    paths:
+      - 'scripts/fix_final_admin_controls.py'
+      - '.github/workflows/apply-final-control-fix.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  integrate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Apply control fix
+        run: python scripts/fix_final_admin_controls.py
+      - name: Install dependencies
+        run: npm install --ignore-scripts --no-audit --no-fund
+      - name: Validate
+        run: npm run check
+      - name: Commit integration
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/admin.ts
+          git commit -m "Evita alteração de agenda ao pausar ou retomar" || exit 0
+          git push
