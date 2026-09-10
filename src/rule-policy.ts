@@ -127,8 +127,11 @@ export function commissionPlan(target: number | null | undefined, settings: Reco
   const enabled = Boolean(settings.flexCommissionEnabled) && desired > 0;
   const step = Math.max(1, Math.min(25, Math.round(Number(settings.flexCommissionStep) || 5)));
   const configuredFloor = Number(settings.flexCommissionFloor);
-  const floor = enabled && Number.isFinite(configuredFloor)
-    ? Math.max(0, Math.min(desired, configuredFloor))
+  const suggestedFloor = desired > 0 ? Math.max(1, Math.round(desired * 0.6 * 100) / 100) : 0;
+  const floor = enabled
+    ? (Number.isFinite(configuredFloor) && configuredFloor > 0
+      ? Math.max(1, Math.min(desired, configuredFloor))
+      : suggestedFloor)
     : desired;
   const thresholds: number[] = [];
   if (!desired) return { enabled: false, desired: 0, floor: 0, step, thresholds: [0] };
