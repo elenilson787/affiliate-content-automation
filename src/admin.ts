@@ -7,6 +7,7 @@ import { cronMatches } from "./cron";
 import { SupabaseRest, eq, type AutomationRuleRow } from "./db";
 import { required, type Env } from "./env";
 import { handleCatalogAdminApi } from "./catalog";
+import { commissionPlan } from "./rule-policy";
 
 type JsonObject = Record<string, unknown>;
 type AdminRuleInput = Record<string, unknown>;
@@ -207,20 +208,71 @@ async function preview(request: Request, env: Env) {
   const maxPrice=rule?.max_price??nullableNumber(body.maxPrice,0,1_000_000)??undefined;
   const provider=createShopeeProvider({appId:required(env.SHOPEE_APP_ID,"SHOPEE_APP_ID"),secret:required(env.SHOPEE_SECRET,"SHOPEE_SECRET")});
   const requestedSort = rule?.sort || (["commission","price","sales","discount"].includes(String(body.sort)) ? String(body.sort) as "commission"|"price"|"sales"|"discount" : undefined);
-  const result=await searchQualifiedOffers(provider,{keyword,minCommission,minDiscount,maxPrice,sort:requestedSort},quantity,{maxPages:2,pageSize:50,maxRequests:10,searchScope});
+  const plan=commissionPlan(minCommission,settings);
+  const effectiveMinCommission=plan.enabled?plan.floor:minCommission;
+  const candidateQuantity=plan.enabled?60:quantity;
+  const result=await searchQualifiedOffers(
+    provider,
+    {keyword,minCommission:effectiveMinCommission,minDiscount,maxPrice,sort:plan.enabled?"commission":requestedSort},
+    candidateQuantity,
+    {maxPages:plan.enabled?3:2,pageSize:50,maxRequests:plan.enabled?12:10,searchScope},
+  );
+
+  const commission=(offer:(typeof result.selected)[number])=>Math.max(0,Number(offer.commissionPercent)||0);
+  const discount=(offer:(typeof result.selected)[number])=>Math.max(0,Number(offer.discountPercent)||0);
+  const sales=(offer:(typeof result.selected)[number])=>Math.max(0,Number(offer.sourceMetadata?.sales)||0);
+  const sortSelected=(offers:typeof result.selected)=>{
+    const copy=[...offers];
+    if(requestedSort==="discount") copy.sort((a,b)=>discount(b)-discount(a)||commission(b)-commission(a));
+    else if(requestedSort==="price") copy.sort((a,b)=>(a.price??Number.POSITIVE_INFINITY)-(b.price??Number.POSITIVE_INFINITY));
+    else if(requestedSort==="sales") copy.sort((a,b)=>sales(b)-sales(a)||commission(b)-commission(a));
+    else copy.sort((a,b)=>commission(b)-commission(a)||discount(b)-discount(a)||sales(b)-sales(a));
+    return copy;
+  };
+
+  let selected=result.selected.slice(0,quantity);
+  let resolvedCommission:number|null=plan.desired||null;
+  const commissionAttempts=plan.enabled
+    ? plan.thresholds.map((threshold)=>({threshold,eligible:result.selected.filter((offer)=>commission(offer)>=threshold).length}))
+    : [];
+
+  if(plan.enabled){
+    const resolved=commissionAttempts.find((attempt)=>attempt.eligible>0);
+    resolvedCommission=resolved?.threshold??null;
+    selected=resolvedCommission==null
+      ? []
+      : sortSelected(result.selected.filter((offer)=>commission(offer)>=resolvedCommission!)).slice(0,quantity);
+  }
+
   const template=validTemplate(settings.contentTemplate); const thread=Number(settings.telegramThreadId); const messageThreadId=Number.isInteger(thread)&&thread>0?thread:undefined;
-  const filters={minCommission:minCommission??null,minDiscount:minDiscount??null,maxPrice:maxPrice??null};
+  const filters={minCommission:minCommission??null,minDiscount:minDiscount??null,maxPrice:maxPrice??null,effectiveMinCommission:effectiveMinCommission??null};
+  let suggestions=buildPreviewSuggestions(result.diagnostics,{minCommission:effectiveMinCommission??null,minDiscount:minDiscount??null,maxPrice:maxPrice??null});
+  if(plan.enabled&&selected.length===0){
+    suggestions=[
+      `A flexibilização já testou a comissão de ${plan.desired}% até o piso autorizado de ${plan.floor}% e não encontrou oferta elegível.`,
+      `Se desejar ampliar mais, reduza o piso de comissão abaixo de ${plan.floor}% ou ajuste os outros filtros.`,
+      ...suggestions.filter((item)=>!item.startsWith("Reduza a comissão mínima")),
+    ].slice(0,3);
+  }
   return json({
     dryRun:true,
-    selected:result.selected.length,
+    selected:selected.length,
     scanned:result.scanned,
     pages:result.pages,
     diagnostics:result.diagnostics,
     strategy:result.strategy,
     searchScope,
     filters,
-    suggestions:buildPreviewSuggestions(result.diagnostics,filters),
-    publications:result.selected.map(offer=>({offer,content:generateContent(offer,"telegram",{template,messageThreadId})})),
+    commissionFlex:{
+      enabled:plan.enabled,
+      target:plan.desired,
+      floor:plan.floor,
+      step:plan.step,
+      resolved:resolvedCommission,
+      attempts:commissionAttempts,
+    },
+    suggestions,
+    publications:selected.map(offer=>({offer,content:generateContent(offer,"telegram",{template,messageThreadId})})),
   });
 }
 
@@ -328,7 +380,7 @@ body:before{content:"";position:fixed;inset:0;pointer-events:none;opacity:.22;ba
 #telegramTopic,#intervalMinutes{background:#071127;color:#eef3ff;border-color:#29416e}
 @media(max-width:700px){.live-preview-grid{grid-template-columns:1fr}.live-preview-grid img{width:100%;height:190px}.topic-custom{grid-template-columns:1fr}}
 
-.preview-diagnostics{display:grid;gap:10px;color:#dce5fb}.preview-diagnostics-head{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}.preview-diagnostics-head b{font-size:13px;color:#f5f7ff}.preview-diagnostics-head span{font-size:11px;color:#8290b2}.diag-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px}.diag-row{display:flex;justify-content:space-between;gap:12px;padding:8px 10px;border:1px solid rgba(59,82,139,.55);border-radius:9px;background:rgba(5,13,31,.55);font-size:11px}.diag-row span{color:#8f9bbc}.diag-row strong{color:#eef3ff}.diag-row.good strong{color:#28e8a0}.diag-row.warn strong{color:#ffca6a}.diag-note{font-size:10px;color:#7180a4}.diag-suggestions{border-top:1px solid rgba(59,82,139,.45);padding-top:9px}.diag-suggestions b{font-size:11px;color:#bcb7ff}.diag-suggestions ul{margin:6px 0 0 17px;padding:0;color:#9ba8c8;font-size:11px;line-height:1.55}.preview-summary{margin-top:10px;padding-top:9px;border-top:1px solid rgba(59,82,139,.4);font-size:10px;color:#8190b1}.preview-summary .new-product{color:#25dba0}@media(max-width:700px){.diag-grid{grid-template-columns:1fr}}
+.preview-diagnostics{display:grid;gap:10px;color:#dce5fb}.preview-diagnostics-head{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}.preview-diagnostics-head b{font-size:13px;color:#f5f7ff}.preview-diagnostics-head span{font-size:11px;color:#8290b2}.diag-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px}.diag-row{display:flex;justify-content:space-between;gap:12px;padding:8px 10px;border:1px solid rgba(59,82,139,.55);border-radius:9px;background:rgba(5,13,31,.55);font-size:11px}.diag-row span{color:#8f9bbc}.diag-row strong{color:#eef3ff}.diag-row.good strong{color:#28e8a0}.diag-row.warn strong{color:#ffca6a}.diag-note{font-size:10px;color:#7180a4}.diag-suggestions{border-top:1px solid rgba(59,82,139,.45);padding-top:9px}.diag-suggestions b{font-size:11px;color:#bcb7ff}.diag-suggestions ul{margin:6px 0 0 17px;padding:0;color:#9ba8c8;font-size:11px;line-height:1.55}.preview-summary{margin-top:10px;padding-top:9px;border-top:1px solid rgba(59,82,139,.4);font-size:10px;color:#8190b1}.preview-summary .new-product{color:#25dba0}.commission-flex-preview{border:1px solid rgba(116,82,255,.48);background:linear-gradient(135deg,rgba(89,52,210,.14),rgba(14,45,91,.18));border-radius:10px;padding:10px}.commission-flex-title{display:flex;justify-content:space-between;gap:10px;align-items:center;margin-bottom:8px}.commission-flex-title span{font-size:10px;color:#9aa8c8}.commission-flex-steps{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:7px}.commission-flex-step{border:1px solid #30456f;background:#09152e;color:#9faed0;padding:5px 7px;border-radius:999px;font-size:10px}.commission-flex-step b{color:#dbe5ff;margin-left:3px}.commission-flex-step.hit{border-color:#21c990;color:#53edba;background:rgba(24,155,112,.12)}@media(max-width:700px){.diag-grid{grid-template-columns:1fr}}
 
 .catalog-toolbar{padding:16px;margin-bottom:14px;background:linear-gradient(145deg,rgba(8,17,38,.96),rgba(9,16,34,.92));border-color:#273d6b}.preset-row{display:flex;gap:8px;flex-wrap:wrap}.preset{border:1px solid #2c426d;background:#0a1530;color:#aab7d8;padding:9px 12px;border-radius:11px;cursor:pointer;font-weight:800;font-size:11px}.preset:hover,.preset.active{color:#fff;border-color:#7752ff;background:linear-gradient(135deg,rgba(95,53,255,.34),rgba(22,166,255,.18));box-shadow:0 0 18px rgba(106,63,255,.18)}.preset-row.compact .preset{padding:7px 9px}.catalog-filters{display:grid;grid-template-columns:repeat(4,minmax(0,1fr)) auto auto;gap:10px;align-items:end;margin-top:14px}.catalog-search{height:40px}.catalog-summary{margin:10px 2px 10px}.catalog-pager{display:flex;align-items:center;justify-content:flex-end;gap:10px;margin:0 0 14px}.catalog-pager .btn:disabled{opacity:.45;cursor:not-allowed}.offer-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}.offer-card{background:linear-gradient(145deg,rgba(8,18,39,.98),rgba(7,13,29,.97));border:1px solid #253b68;border-radius:16px;overflow:hidden;box-shadow:0 18px 42px rgba(0,0,0,.18);display:flex;flex-direction:column}.offer-card .photo{aspect-ratio:1.35/1;background:#09142b;display:grid;place-items:center;overflow:hidden}.offer-card .photo img{width:100%;height:100%;object-fit:contain;background:#fff}.offer-card .body{padding:13px;display:grid;gap:9px}.offer-card .title{font-size:13px;font-weight:850;line-height:1.35;color:#f1f5ff;min-height:36px}.offer-metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}.offer-metric{background:rgba(15,28,58,.72);border:1px solid rgba(45,65,111,.72);padding:7px;border-radius:9px}.offer-metric small{display:block;color:#7f8eb2;font-size:9px}.offer-metric b{font-size:11px;color:#e9eeff}.score{display:inline-flex;align-items:center;gap:5px;color:#27e9a2;font-weight:900}.offer-actions{display:flex;gap:7px;align-items:center}.offer-actions select{min-width:0;flex:1;background:#081127;border:1px solid #293d69;color:#edf2ff;border-radius:9px;padding:8px}.list-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:13px}.smart-list{background:linear-gradient(145deg,rgba(8,18,39,.98),rgba(7,13,29,.97));border:1px solid #253b68;border-radius:16px;padding:16px}.smart-list h4{margin:0;color:#f5f7ff}.list-meta{display:flex;gap:7px;flex-wrap:wrap;margin:10px 0}.list-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin:12px 0}.list-stat{padding:8px;border-radius:9px;background:rgba(14,27,57,.68);border:1px solid #243b67}.list-stat small{display:block;color:#7d8daf;font-size:9px}.list-stat b{font-size:12px}.list-items-preview{display:flex;gap:6px;margin:10px 0}.list-items-preview img{width:42px;height:42px;border-radius:9px;object-fit:cover;background:#fff;border:1px solid #29416e}@media(max-width:1100px){.offer-grid{grid-template-columns:repeat(2,1fr)}.catalog-filters{grid-template-columns:repeat(2,1fr)}.list-grid{grid-template-columns:1fr}}@media(max-width:700px){.offer-grid,.catalog-filters{grid-template-columns:1fr}.offer-card .photo{aspect-ratio:1.6/1}}
 
@@ -417,28 +469,34 @@ body:before{content:"";position:fixed;inset:0;pointer-events:none;opacity:.22;ba
   function inferLegacyInterval(cron){if(cron==='*/10 * * * *')return 10;if(cron==='*/15 * * * *')return 15;if(cron==='*/20 * * * *')return 20;if(cron==='*/30 * * * *')return 30;if(cron==='0 9-22 * * *')return 60;return 60}
   async function hydrate(ruleId){try{var data=await api('/api/admin/dashboard'),rule=ruleId?(data.rules||[]).find(function(r){return r.id===ruleId}):null,settings=rule&&rule.settings||{};if(byId('intervalMinutes'))byId('intervalMinutes').value=String(Number(settings.intervalMinutes)||inferLegacyInterval(rule&&rule.schedule_cron));if(byId('windowStart'))byId('windowStart').value=settings.windowStart||'09:00';if(byId('windowEnd'))byId('windowEnd').value=settings.windowEnd||'22:00';await refreshTopics(settings.telegramThreadId,settings.telegramTopicName);if(byId('sourceList')){var wanted=settings.listId?String(settings.listId):'';setTimeout(function(){if(byId('sourceList')&&Array.from(byId('sourceList').options).some(function(o){return o.value===wanted}))byId('sourceList').value=wanted},180)}if(!rule){if(byId('threadId'))byId('threadId').value='';if(byId('topicName'))byId('topicName').value=''}setTimeout(function(){},120)}catch(e){console.warn('hydrate',e)}}
   function renderPreviewDiagnostics(res){
-    var d=res&&res.diagnostics||{},suggestions=res&&res.suggestions||[],scanned=Number(res&&res.scanned||d.scanned||0);
+    var d=res&&res.diagnostics||{},suggestions=res&&res.suggestions||[],scanned=Number(res&&res.scanned||d.scanned||0),flex=res&&res.commissionFlex;
+    var commissionLabel=flex&&flex.enabled?'Abaixo do piso de comissão ('+flex.floor+'%)':'Abaixo da comissão mínima';
     var rows=[
       ['Não relacionados / acessórios',d.rejectedRelevance||0,''],
-      ['Abaixo da comissão mínima',d.belowCommission||0,'warn'],
+      [commissionLabel,d.belowCommission||0,'warn'],
       ['Abaixo do desconto mínimo',d.belowDiscount||0,'warn'],
       ['Acima do preço máximo',d.aboveMaxPrice||0,'warn'],
       ['Anúncios equivalentes',d.equivalentDuplicates||0,''],
       ['Métricas inválidas',d.invalidMetrics||0,''],
       ['Elegíveis',d.eligible||0,'good']
     ];
-    var html='<div class="preview-diagnostics"><div class="preview-diagnostics-head"><b>Nenhuma oferta elegível com a combinação atual</b><span>'+esc(scanned)+' analisadas · '+esc(res&&res.pages||0)+' página(s)</span></div><div class="diag-grid">';
+    var flexHtml='';
+    if(flex&&flex.enabled){
+      var attempts=flex.attempts||[];
+      flexHtml='<div class="commission-flex-preview"><div class="commission-flex-title"><b>Flexibilização automática da comissão</b><span>Meta '+esc(flex.target)+'% · piso '+esc(flex.floor)+'%</span></div><div class="commission-flex-steps">'+attempts.map(function(a){return'<span class="commission-flex-step '+(a.eligible>0?'hit':'')+'">≥ '+esc(a.threshold)+'% <b>'+esc(a.eligible)+'</b></span>'}).join('')+'</div><div class="diag-note">'+(flex.resolved!=null?'A primeira faixa com oferta elegível foi ≥ '+esc(flex.resolved)+'%.':'A busca chegou ao piso autorizado sem encontrar uma oferta que também cumpra os demais filtros.')+'</div></div>';
+    }
+    var html='<div class="preview-diagnostics"><div class="preview-diagnostics-head"><b>Nenhuma oferta elegível com a combinação atual</b><span>'+esc(scanned)+' analisadas · '+esc(res&&res.pages||0)+' página(s)</span></div>'+flexHtml+'<div class="diag-grid">';
     rows.forEach(function(r){html+='<div class="diag-row '+r[2]+'"><span>'+esc(r[0])+'</span><strong>'+esc(r[1])+'</strong></div>'});
     html+='</div><div class="diag-note">Os motivos são independentes: o mesmo anúncio pode deixar de atender a mais de um filtro.</div>';
     if(suggestions.length){html+='<div class="diag-suggestions"><b>Sugestões para ampliar a busca</b><ul>';suggestions.forEach(function(x){html+='<li>'+esc(x)+'</li>'});html+='</ul></div>'}
     html+='</div>';return html;
   }
-  function previewDiagnosticSummary(res){var d=res&&res.diagnostics||{};var zero=Number(d.zeroSalesAccepted||0);return '<div class="preview-summary">'+esc(res&&res.scanned||0)+' anúncios únicos · '+esc(d.eligible||0)+' elegíveis · '+esc(res&&res.strategy&&res.strategy.requests||res&&res.pages||0)+' consultas'+(zero? ' · <span class="new-product">'+esc(zero)+' com 0 vendas aceitas</span>':'')+'</div>'}
+  function previewDiagnosticSummary(res){var d=res&&res.diagnostics||{},zero=Number(d.zeroSalesAccepted||0),f=res&&res.commissionFlex,flexText='';if(f&&f.enabled){var path=(f.attempts||[]).map(function(a){return a.threshold+'%'}).join(' → ');flexText=f.resolved!=null?(f.resolved<f.target?' · comissão flexibilizada '+esc(f.target)+'% → '+esc(f.resolved)+'%':' · meta de comissão '+esc(f.target)+'% atendida'):' · flexibilização '+esc(path)+' sem resultado'}return '<div class="preview-summary">'+esc(res&&res.scanned||0)+' anúncios únicos · '+esc(d.eligible||0)+' elegíveis · '+esc(res&&res.strategy&&res.strategy.requests||res&&res.pages||0)+' consultas'+flexText+(zero? ' · <span class="new-product">'+esc(zero)+' com 0 vendas aceitas</span>':'')+'</div>'}
   async function refreshInlinePreview(){
     var card=byId('livePreviewCard');if(!card)return;if(card.dataset.loading==='1')return;
     card.dataset.loading='1';card.innerHTML='<div class="live-preview-placeholder">Buscando ofertas e analisando cada filtro…</div>';
     try{
-      var settings={contentTemplate:(byId('contentTemplate')&&byId('contentTemplate').value)||'offer',searchScope:'all',description:(byId('description')&&byId('description').value.trim())||'',telegramThreadId:currentThread(),telegramTopicName:currentTopicName()};
+      var targetCommission=Number(byId('minCommission')&&byId('minCommission').value),flexEnabled=Number.isFinite(targetCommission)&&targetCommission>0&&!!(byId('flexCommissionEnabled')&&byId('flexCommissionEnabled').checked),floorValue=Number(byId('flexCommissionFloor')&&byId('flexCommissionFloor').value),stepValue=Number(byId('flexCommissionStep')&&byId('flexCommissionStep').value);var settings={contentTemplate:(byId('contentTemplate')&&byId('contentTemplate').value)||'offer',searchScope:'all',description:(byId('description')&&byId('description').value.trim())||'',telegramThreadId:currentThread(),telegramTopicName:currentTopicName(),flexCommissionEnabled:flexEnabled,flexCommissionStep:[5,10].includes(stepValue)?stepValue:5,flexCommissionFloor:flexEnabled?(Number.isFinite(floorValue)&&floorValue>0?floorValue:Math.max(1,Math.round(targetCommission*0.6*10)/10)):null};
       var payload={keyword:'',quantity:1,minCommission:byId('minCommission')&&byId('minCommission').value,minDiscount:byId('minDiscount')&&byId('minDiscount').value,maxPrice:byId('maxPrice')&&byId('maxPrice').value,sort:byId('sort')&&byId('sort').value,settings:settings};
       var res=await api('/api/admin/preview',{method:'POST',body:JSON.stringify(payload)}),pub=res.publications&&res.publications[0];
       if(!pub){card.innerHTML=renderPreviewDiagnostics(res);return}
@@ -527,7 +585,7 @@ function bindSmartForm(){if(document.body.dataset.smartFormBound==='1')return;do
 function updateSourceFields(){var m=document.getElementById('sourceMode')?.value||'all',single=document.getElementById('singleNicheField'),mix=document.getElementById('nicheMixField'),list=document.getElementById('sourceList')?.closest('.field');if(single)single.classList.toggle('hidden',m!=='niche');if(mix)mix.classList.toggle('hidden',m!=='mix');if(list)list.classList.toggle('hidden',m!=='list')}
 function updateCapacity(){var box=document.getElementById('capacityBox');if(!box)return;var start=document.getElementById('activeStartDate')?.value||smartDateToday(),end=document.getElementById('activeEndDate')?.value||'',rawInterval=Number(document.getElementById('intervalMinutes')?.value),i=Number.isFinite(rawInterval)&&rawInterval>0?rawInterval:60,a=minutes(document.getElementById('windowStart')?.value,'09:00'),b=minutes(document.getElementById('windowEnd')?.value,'22:00'),span=a<=b?b-a:1440-a+b,per=Math.floor(span/i)+1,checked=Array.from(document.querySelectorAll('[data-weekday]:checked'));if(!checked.length){box.innerHTML='<b>Selecione ao menos um dia da semana.</b>';return}if(end&&end<start){box.innerHTML='<b>Data final anterior à data inicial.</b>';return}var total=null;if(end){var d=new Date(start+'T00:00:00Z'),e=new Date(end+'T00:00:00Z'),active=0,allowed=checked.map(function(x){return Number(x.dataset.weekday)});for(var guard=0;d<=e&&guard<3700;guard++){if(allowed.indexOf(d.getUTCDay())>=0)active++;d=new Date(d.getTime()+86400000)}total=active*per}var intervalLabel=i<60?i+' min':i===60?'1 hora':i%60===0?(i/60)+' horas':Math.floor(i/60)+'h'+String(i%60).padStart(2,'0');box.innerHTML='<b>'+per+' publicações por dia ativo</b><div>'+((document.getElementById('windowStart')?.value||'09:00')+' → '+(document.getElementById('windowEnd')?.value||'22:00')+' · intervalo '+intervalLabel)+'. '+(total==null?'A automação continua enquanto estiver ativa.':total+' horários no período selecionado.')+' O produto é buscado perto de cada horário.</div>'}
 function smartSection(id,title,description){var grid=document.querySelector('#ruleForm .form-grid'),section=document.getElementById(id);if(!grid)return null;if(!section){section=document.createElement('div');section.id=id;section.className='field full form-section-v2';section.innerHTML='<div class="form-section-v2-head"><h4>'+title+'</h4><span>'+description+'</span></div><div class="form-section-v2-grid"></div>';grid.appendChild(section)}return section.querySelector('.form-section-v2-grid')}
-function moveSmartNode(target,node){if(target&&node&&!target.contains(node))target.appendChild(node)}
+function moveSmartNode(target,node){if(target&&node&&node.parentElement!==target)target.appendChild(node)}
 function organizeSmartForm(){var form=document.getElementById('ruleForm'),grid=form&&form.querySelector('.form-grid');if(!grid)return;var identity=smartSection('formIdentity','1 · Identificação','Dê um nome claro para reconhecer a automação.'),source=smartSection('formSource','2 · Fonte dos produtos','Escolha de onde virão as ofertas.'),quality=smartSection('formQuality','3 · Critérios das ofertas','Defina qualidade, comissão, desconto e repetição.'),agenda=smartSection('formAgenda','4 · Agenda','Defina período, dias, janela e frequência.'),destination=smartSection('formDestination','5 · Destino','Escolha onde a publicação será enviada.'),content=smartSection('formContent','6 · Conteúdo','Escolha o formato da mensagem e confira a prévia.'),execution=smartSection('formExecution','7 · Execução','Defina se ficará ativa e se está em modo de teste.');var field=function(id){var e=document.getElementById(id);return e&&e.closest('.field')};moveSmartNode(identity,field('name'));moveSmartNode(identity,field('description'));var sourceBlock=document.getElementById('sourceMode')?.closest('.smart-form-block');moveSmartNode(source,sourceBlock);moveSmartNode(source,field('sourceList'));moveSmartNode(quality,field('repeatDays'));moveSmartNode(quality,field('minCommission'));moveSmartNode(quality,field('minDiscount'));moveSmartNode(quality,field('maxPrice'));moveSmartNode(quality,field('sort'));moveSmartNode(quality,document.getElementById('flexCommissionEnabled')?.closest('.smart-form-block'));var dateBlock=document.getElementById('activeStartDate')?.closest('.smart-form-block');moveSmartNode(agenda,dateBlock);moveSmartNode(agenda,field('intervalMinutes'));var cap=document.getElementById('capacityBox');if(cap)moveSmartNode(agenda,cap);moveSmartNode(destination,field('telegramTopic')||field('threadId'));var tz=field('timezone');if(tz){var label=tz.querySelector('label');if(label)label.textContent='Fuso horário';moveSmartNode(destination,tz)}moveSmartNode(content,field('contentTemplate'));moveSmartNode(content,document.getElementById('livePreviewCard')?.closest('.field'));moveSmartNode(execution,field('enabled'));[sourceBlock,dateBlock].forEach(function(block){var title=block&&block.querySelector('.smart-form-title');if(title)title.style.display='none'});var scheduleField=field('intervalMinutes');if(scheduleField){var helper=scheduleField.querySelector('small.muted');if(helper)helper.textContent='A plataforma acompanha automaticamente a agenda e publica quando chegar cada horário configurado.'}updateCapacity();updateFlexUI()}
 function hydrateSmartForm(ruleId){ensureSmartForm();var r=ruleId&&SMART.data?(SMART.data.rules||[]).find(function(x){return x.id===ruleId}):null,s=r&&r.settings||{},target=Number(r&&r.min_commission);var start=document.getElementById('activeStartDate');if(start)start.value=s.activeStartDate||smartDateToday();var end=document.getElementById('activeEndDate');if(end)end.value=s.activeEndDate||'';var mode=document.getElementById('sourceMode');if(mode)mode.value=s.sourceMode||((s.listId)?'list':'all');var niche=document.getElementById('sourceNiche');if(niche)niche.value=s.niche||'casa_cozinha';document.querySelectorAll('[data-weekday]').forEach(function(e){e.checked=!Array.isArray(s.activeWeekdays)||s.activeWeekdays.length===0||s.activeWeekdays.map(Number).indexOf(Number(e.dataset.weekday))>=0});document.querySelectorAll('[data-mix-check]').forEach(function(e){var found=Array.isArray(s.nicheMix)?s.nicheMix.find(function(x){return x.niche===e.dataset.mixCheck}):null;e.checked=!!found;var w=document.querySelector('[data-mix-weight="'+e.dataset.mixCheck+'"]');if(w){w.disabled=!found;w.value=found?String(found.weight||20):'20'}});var fe=document.getElementById('flexCommissionEnabled');if(fe)fe.checked=!!s.flexCommissionEnabled&&Number.isFinite(target)&&target>0;var fs=document.getElementById('flexCommissionStep');if(fs)fs.value=String([5,10].includes(Number(s.flexCommissionStep))?Number(s.flexCommissionStep):5);var ff=document.getElementById('flexCommissionFloor');if(ff){ff.value=s.flexCommissionFloor!=null&&Number(s.flexCommissionFloor)>0?String(s.flexCommissionFloor):(Number.isFinite(target)&&target>0?String(suggestedCommissionFloor(target)):'');ff.dataset.touched=s.flexCommissionFloor!=null&&Number(s.flexCommissionFloor)>0?'1':''}updateSourceFields();organizeSmartForm();updateFlexUI();updateCapacity();setTimeout(function(){organizeSmartForm();updateFlexUI();updateCapacity()},260)}
 function collectSmartSettings(body){ensureSmartForm();body.quantity=1;body.settings=Object.assign({},body.settings||{});var s=body.settings;s.scheduleMode='slots';s.activeStartDate=document.getElementById('activeStartDate')?.value||smartDateToday();s.activeEndDate=document.getElementById('activeEndDate')?.value||null;s.activeWeekdays=Array.from(document.querySelectorAll('[data-weekday]:checked')).map(function(e){return Number(e.dataset.weekday)});s.sourceMode=document.getElementById('sourceMode')?.value||'all';s.niche=s.sourceMode==='niche'?(document.getElementById('sourceNiche')?.value||null):null;s.nicheMix=s.sourceMode==='mix'?Array.from(document.querySelectorAll('[data-mix-check]:checked')).map(function(e){return{niche:e.dataset.mixCheck,weight:Number(document.querySelector('[data-mix-weight="'+e.dataset.mixCheck+'"]')?.value)||20}}):[];if(s.sourceMode!=='list'){s.listId=null;s.listName=null;var sl=document.getElementById('sourceList');if(sl)sl.value=''}var target=Number(body.min_commission);s.flexCommissionEnabled=Number.isFinite(target)&&target>0&&!!document.getElementById('flexCommissionEnabled')?.checked;s.flexCommissionStep=[5,10].includes(Number(document.getElementById('flexCommissionStep')?.value))?Number(document.getElementById('flexCommissionStep')?.value):5;if(s.flexCommissionEnabled){var floor=Number(document.getElementById('flexCommissionFloor')?.value);if(!Number.isFinite(floor)||floor<=0)floor=suggestedCommissionFloor(target);s.flexCommissionFloor=Math.min(target,Math.max(1,floor))}else{s.flexCommissionFloor=null}return body}
