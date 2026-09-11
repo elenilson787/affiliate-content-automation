@@ -5,6 +5,7 @@ export type ContentTemplate = "offer" | "natural" | "storytelling" | "no_price";
 export type ContentOptions = {
   template?: ContentTemplate;
   messageThreadId?: number;
+  pinterestBoardId?: string;
 };
 
 function brl(value?: number) {
@@ -82,5 +83,6 @@ export function generateContent(offer: Offer, channel: SocialChannel, options: C
     affiliateUrl,
     imageUrl: offer.imageUrl,
     messageThreadId: options.messageThreadId,
+    pinterestBoardId: options.pinterestBoardId,
   };
 }
