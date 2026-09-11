@@ -4,6 +4,7 @@ import { searchQualifiedOffers } from "../lib/search-engine";
 import { adminPage, handleAdminApi } from "./admin";
 import { runFullTick, schedulerTick, workerTick } from "./automation";
 import { required, type Env } from "./env";
+import { handlePinterestAdminApi, handlePinterestCallback, pinterestAppConfigured } from "./pinterest";
 
 type CloudflareScheduledController = {
   cron: string;
@@ -33,6 +34,7 @@ function safeConfig(env: Env) {
   return {
     shopee: Boolean(env.SHOPEE_APP_ID && env.SHOPEE_SECRET),
     telegram: Boolean(env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_CHAT_ID),
+    pinterest: pinterestAppConfigured(env),
     supabase: Boolean(env.SUPABASE_URL && (env.SUPABASE_SECRET_KEY || env.SUPABASE_SERVICE_ROLE_KEY)),
     protectedEndpoints: Boolean(env.AUTOMATION_SECRET),
   };
@@ -95,6 +97,10 @@ async function handleFetch(request: Request, env: Env) {
     });
   }
 
+  if (request.method === "GET" && url.pathname === "/oauth/pinterest/callback") {
+    return handlePinterestCallback(request, env);
+  }
+
   if (request.method === "GET" && (url.pathname === "/admin" || url.pathname === "/admin/")) {
     return adminPage();
   }
@@ -102,6 +108,7 @@ async function handleFetch(request: Request, env: Env) {
   if (url.pathname.startsWith("/api/admin/")) {
     if (!authorized(request, env)) return json({ error: "UNAUTHORIZED" }, 401);
     try {
+      if (url.pathname.startsWith("/api/admin/pinterest/")) return await handlePinterestAdminApi(request, env);
       return await handleAdminApi(request, env);
     } catch (error) {
       console.error("admin request failed", error);

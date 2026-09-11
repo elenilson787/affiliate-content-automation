@@ -2,6 +2,7 @@ import { createShopeeProvider } from "../lib/affiliate/shopee/adapter";
 import { generateContent, type ContentTemplate } from "../lib/content-engine";
 import { offerKey, productsLookEquivalent } from "../lib/offer-engine";
 import { createTelegramPublisher } from "../lib/publishers/telegram";
+import { createPinterestPublisher } from "../lib/publishers/pinterest";
 import { searchQualifiedOffers } from "../lib/search-engine";
 import type { GeneratedContent, Offer } from "../lib/types";
 import { findDueSlot, stableUuid } from "./cron";
@@ -9,6 +10,7 @@ import { SupabaseRest, eq, type AutomationRuleRow, type PublicationQueueRow } fr
 import { boundedInt, required, type Env } from "./env";
 import type { OfferListItemRow, OfferListRow } from "./catalog";
 import { chooseMixNiche, commissionPlan, isSlotDue, mixFallbackOrder, nicheLabel, nicheQuery, sourceMode } from "./rule-policy";
+import { getPinterestAccess, pinterestApiBase } from "./pinterest";
 
 const SCHEDULER_LOOKBACK_MINUTES = 5;
 
@@ -58,7 +60,10 @@ function contentOptions(settings: Record<string, unknown>) {
     : "offer";
   const threadRaw = Number(settings.telegramThreadId);
   const messageThreadId = Number.isInteger(threadRaw) && threadRaw > 0 ? threadRaw : undefined;
-  return { template, messageThreadId };
+  const pinterestBoardId = typeof settings.pinterestBoardId === "string" && settings.pinterestBoardId.trim()
+    ? settings.pinterestBoardId.trim()
+    : undefined;
+  return { template, messageThreadId, pinterestBoardId };
 }
 
 async function loadEnabledRules(db: SupabaseRest) {
@@ -681,6 +686,9 @@ function contentFromQueue(row: PublicationQueueRow): GeneratedContent {
     messageThreadId: Number.isInteger(Number(content.messageThreadId)) && Number(content.messageThreadId) > 0
       ? Number(content.messageThreadId)
       : undefined,
+    pinterestBoardId: typeof content.pinterestBoardId === "string" && content.pinterestBoardId.trim()
+      ? content.pinterestBoardId.trim()
+      : undefined,
   };
 }
 
@@ -734,13 +742,26 @@ async function publishQueueItem(db: SupabaseRest, env: Env, workerId: string, ro
       return { id: row.id, runId: row.run_id, status: "deferred" as const, scheduledFor: deferredUntil };
     }
     const content = contentFromQueue(row);
-    if (row.channel !== "telegram") throw new Error(`PUBLISHER_NOT_CONFIGURED: ${row.channel}`);
-
-    const publisher = createTelegramPublisher({
-      token: required(env.TELEGRAM_BOT_TOKEN, "TELEGRAM_BOT_TOKEN"),
-      chatId: required(env.TELEGRAM_CHAT_ID, "TELEGRAM_CHAT_ID"),
-    });
-    const result = await publisher.publish(content);
+    let result: { externalId?: string };
+    if (row.channel === "telegram") {
+      const publisher = createTelegramPublisher({
+        token: required(env.TELEGRAM_BOT_TOKEN, "TELEGRAM_BOT_TOKEN"),
+        chatId: required(env.TELEGRAM_CHAT_ID, "TELEGRAM_CHAT_ID"),
+      });
+      result = await publisher.publish(content);
+    } else if (row.channel === "pinterest") {
+      const { connection, accessToken } = await getPinterestAccess(env, db);
+      const boardId = content.pinterestBoardId || connection.default_board_id || "";
+      if (!boardId) throw new Error("PINTEREST_DEFAULT_BOARD_REQUIRED");
+      const publisher = createPinterestPublisher({
+        accessToken,
+        boardId,
+        apiBase: pinterestApiBase(env),
+      });
+      result = await publisher.publish(content);
+    } else {
+      throw new Error(`PUBLISHER_NOT_CONFIGURED: ${row.channel}`);
+    }
 
     await db.rpc<PublicationQueueRow[]>("complete_publication", {
       p_queue_id: row.id,
