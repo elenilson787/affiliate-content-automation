@@ -2,7 +2,7 @@ name: Apply unified preview patch
 on:
   push:
     paths:
-      - scripts/patch_unified_preview_v2.py
+      - scripts/patch_unified_preview_v3.py
       - .github/workflows/apply-unified-preview-patch.yml
 permissions:
   contents: write
@@ -16,7 +16,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: python3 scripts/patch_unified_preview_v2.py
+      - run: python3 scripts/patch_unified_preview_v3.py
       - run: npm ci
       - run: npm run check
       - name: Commit patch
