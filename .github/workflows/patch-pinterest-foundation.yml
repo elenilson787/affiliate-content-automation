@@ -1,0 +1,36 @@
+name: Patch Pinterest foundation
+on:
+  push:
+    branches: [staging/progressive-day-plan]
+    paths:
+      - 'scripts/patch_pinterest_foundation.py'
+      - '.github/workflows/patch-pinterest-foundation.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: staging/progressive-day-plan
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: python3 scripts/patch_pinterest_foundation.py
+      - run: npm install --ignore-scripts --no-audit --no-fund
+      - run: npm run check
+      - name: Commit patch to staging branch
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/admin.ts src/automation.ts src/worker.ts
+          if git diff --cached --quiet; then
+            echo 'No changes to commit'
+          else
+            git commit -m 'Integra Pinterest via OAuth e API v5'
+            git push origin HEAD:staging/progressive-day-plan
+          fi
