@@ -233,6 +233,7 @@ export async function searchOffersForRule(
   targetQuantity = rule.quantity,
   excludeOffer?: (offer: Offer) => boolean,
   slot = new Date(),
+  searchTuning: { pageStart?: number; maxRequests?: number; maxPages?: number } = {},
 ) {
   const unsupportedNetworks: string[] = [];
   let scanned = 0;
@@ -327,7 +328,14 @@ export async function searchOffersForRule(
           sort: requestedSort,
         },
         remaining,
-        { maxPages: 2, pageSize: 50, maxRequests: 8, searchScope: scope, excludeOffer },
+        {
+          maxPages: searchTuning.maxPages ?? 2,
+          pageSize: 50,
+          maxRequests: searchTuning.maxRequests ?? 8,
+          pageStart: searchTuning.pageStart ?? 1,
+          searchScope: scope,
+          excludeOffer,
+        },
       );
       scanned += primary.scanned;
       pages += primary.pages;
@@ -352,7 +360,14 @@ export async function searchOffersForRule(
             sort: "commission",
           },
           Math.min(30, Math.max(12, remaining * 8)),
-          { maxPages: 3, pageSize: 50, maxRequests: 12, searchScope: scope, excludeOffer },
+          {
+            maxPages: Math.max(searchTuning.maxPages ?? 3, 3),
+            pageSize: 50,
+            maxRequests: Math.max(searchTuning.maxRequests ?? 12, 12),
+            pageStart: searchTuning.pageStart ?? 1,
+            searchScope: scope,
+            excludeOffer,
+          },
         );
         scanned += fallback.scanned;
         pages += fallback.pages;
