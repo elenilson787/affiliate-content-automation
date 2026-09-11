@@ -1,0 +1,36 @@
+name: Patch progressive day plan
+on:
+  push:
+    branches: [staging/progressive-day-plan]
+    paths:
+      - 'scripts/patch_progressive_day_plan.py'
+      - '.github/workflows/patch-progressive-day-plan.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: staging/progressive-day-plan
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: python3 scripts/patch_progressive_day_plan.py
+      - run: npm install --ignore-scripts --no-audit --no-fund
+      - run: npm run check
+      - name: Commit patch to staging branch
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/admin.ts src/automation.ts
+          if git diff --cached --quiet; then
+            echo 'No changes to commit'
+          else
+            git commit -m 'Aumenta progressivamente a cobertura da agenda prevista'
+            git push origin HEAD:staging/progressive-day-plan
+          fi
