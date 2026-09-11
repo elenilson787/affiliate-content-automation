@@ -29,8 +29,8 @@ automation = replace_once(
 
 automation = replace_once(
     automation,
-    '''          { maxPages: 3, pageSize: 50, maxRequests: 10, searchScope: scope, excludeOffer },''',
-    '''          {\n            maxPages: Math.max(searchTuning.maxPages ?? 3, 3),\n            pageSize: 50,\n            maxRequests: Math.max(searchTuning.maxRequests ?? 10, 10),\n            pageStart: searchTuning.pageStart ?? 1,\n            searchScope: scope,\n            excludeOffer,\n          },''',
+    '''          { maxPages: 3, pageSize: 50, maxRequests: 12, searchScope: scope, excludeOffer },''',
+    '''          {\n            maxPages: Math.max(searchTuning.maxPages ?? 3, 3),\n            pageSize: 50,\n            maxRequests: Math.max(searchTuning.maxRequests ?? 12, 12),\n            pageStart: searchTuning.pageStart ?? 1,\n            searchScope: scope,\n            excludeOffer,\n          },''',
     'fallback search options',
 )
 
