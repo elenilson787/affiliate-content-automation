@@ -1,0 +1,32 @@
+name: Add first day plan
+on:
+  push:
+    paths:
+      - scripts/add_first_day_plan.py
+      - .github/workflows/add-first-day-plan.yml
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: python3 scripts/add_first_day_plan.py
+      - run: npm install --ignore-scripts --no-audit --no-fund
+      - run: npm run check
+      - name: Commit patch
+        run: |
+          if git diff --quiet -- src/admin.ts; then
+            echo "No changes to commit"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/admin.ts
+          git commit -m "Adiciona agenda prevista do primeiro dia"
+          git push
