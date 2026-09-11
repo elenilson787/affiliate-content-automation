@@ -3,6 +3,7 @@ on:
   push:
     paths:
       - scripts/patch_unified_preview.py
+      - .github/workflows/apply-unified-preview-patch.yml
 permissions:
   contents: write
 jobs:
