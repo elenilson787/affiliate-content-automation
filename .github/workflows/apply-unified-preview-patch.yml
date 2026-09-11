@@ -17,7 +17,7 @@ jobs:
         with:
           node-version: 22
       - run: python3 scripts/patch_unified_preview_v3.py
-      - run: npm ci
+      - run: npm install --ignore-scripts --no-audit --no-fund
       - run: npm run check
       - name: Commit patch
         run: |
