@@ -3,6 +3,11 @@ export interface Env {
   SHOPEE_SECRET?: string;
   TELEGRAM_BOT_TOKEN?: string;
   TELEGRAM_CHAT_ID?: string;
+  PINTEREST_APP_ID?: string;
+  PINTEREST_APP_SECRET?: string;
+  PINTEREST_REDIRECT_URI?: string;
+  PINTEREST_TOKEN_KEY?: string;
+  PINTEREST_ENVIRONMENT?: string;
   SUPABASE_URL?: string;
   SUPABASE_SECRET_KEY?: string;
   SUPABASE_SERVICE_ROLE_KEY?: string;
