@@ -1,5 +1,5 @@
 export type AffiliateNetwork = "shopee" | "amazon" | "mercadolivre" | "magalu" | "aliexpress" | string;
-export type SocialChannel = "telegram" | "whatsapp" | "facebook" | "instagram" | "threads" | string;
+export type SocialChannel = "telegram" | "pinterest" | "whatsapp" | "facebook" | "instagram" | "threads" | string;
 
 export type Offer = {
   id: string;
@@ -43,6 +43,7 @@ export type GeneratedContent = {
   affiliateUrl: string;
   imageUrl?: string;
   messageThreadId?: number;
+  pinterestBoardId?: string;
 };
 
 export type Publisher = {
