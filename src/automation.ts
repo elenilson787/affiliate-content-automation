@@ -226,7 +226,7 @@ function passesOfferBounds(offer: Offer, minDiscount?: number | null, maxPrice?:
   return true;
 }
 
-async function searchOffers(
+export async function searchOffersForRule(
   db: SupabaseRest,
   env: Env,
   rule: AutomationRuleRow,
@@ -258,6 +258,12 @@ async function searchOffers(
   let resolvedCommission: number | null = null;
   let selectedNiche: string | null = null;
   let commissionAttempts: number[] = [];
+  const commissionAttemptStats: Array<{ threshold: number; eligible: number }> = [];
+  const recordCommissionAttempt = (threshold: number, eligible: number) => {
+    const existing = commissionAttemptStats.find((item) => item.threshold === threshold);
+    if (existing) existing.eligible = Math.max(existing.eligible, eligible);
+    else commissionAttemptStats.push({ threshold, eligible });
+  };
 
   const addUnique = (offers: Offer[]) => {
     for (const offer of offers) {
@@ -281,6 +287,7 @@ async function searchOffers(
     for (const threshold of plan.thresholds) {
       commissionAttempts.push(threshold);
       const candidates = snapshots.filter((offer) => Math.max(0, Number(offer.commissionPercent) || 0) >= threshold);
+      recordCommissionAttempt(threshold, candidates.length);
       addUnique(candidates);
       if (selected.length >= targetQuantity) { resolvedCommission = threshold; break; }
     }
@@ -326,6 +333,7 @@ async function searchOffers(
       pages += primary.pages;
       excluded += primary.excluded;
       if (!commissionAttempts.includes(plan.desired)) commissionAttempts.push(plan.desired);
+      recordCommissionAttempt(plan.desired, primary.selected.length);
       addUnique(primary.selected);
       if (selected.length >= targetQuantity) {
         resolvedCommission = plan.desired || 0;
@@ -352,8 +360,10 @@ async function searchOffers(
         const ranked = localSortOffers(fallback.selected, requestedSort ?? null);
         for (const threshold of plan.thresholds.slice(1)) {
           if (!commissionAttempts.includes(threshold)) commissionAttempts.push(threshold);
+          const thresholdCandidates = ranked.filter((offer) => Math.max(0, Number(offer.commissionPercent) || 0) >= threshold);
+          recordCommissionAttempt(threshold, thresholdCandidates.length);
           const before = selected.length;
-          addUnique(ranked.filter((offer) => Math.max(0, Number(offer.commissionPercent) || 0) >= threshold));
+          addUnique(thresholdCandidates);
           if (selected.length > before) resolvedCommission = threshold;
           if (selected.length >= targetQuantity) break;
         }
@@ -373,6 +383,7 @@ async function searchOffers(
     commissionTarget: plan.desired,
     commissionResolved: resolvedCommission,
     commissionAttempts,
+    commissionAttemptStats,
   };
 }
 
@@ -425,7 +436,7 @@ async function executeRule(db: SupabaseRest, env: Env, rule: AutomationRuleRow, 
       commissionTarget,
       commissionResolved,
       commissionAttempts,
-    } = await searchOffers(db, env, rule, candidateTarget, excludeOffer, slot);
+    } = await searchOffersForRule(db, env, rule, candidateTarget, excludeOffer, slot);
 
     if (rule.dry_run) {
       const selected = candidates.slice(0, requestedQuantity);

@@ -1,13 +1,10 @@
-import { createShopeeProvider } from "../lib/affiliate/shopee/adapter";
 import { generateContent, type ContentTemplate } from "../lib/content-engine";
 import { createTelegramPublisher } from "../lib/publishers/telegram";
-import { searchQualifiedOffers } from "../lib/search-engine";
-import { runRuleNow, workerTick } from "./automation";
+import { runRuleNow, searchOffersForRule, workerTick } from "./automation";
 import { cronMatches } from "./cron";
 import { SupabaseRest, eq, type AutomationRuleRow } from "./db";
 import { required, type Env } from "./env";
 import { handleCatalogAdminApi } from "./catalog";
-import { commissionPlan } from "./rule-policy";
 
 type JsonObject = Record<string, unknown>;
 type AdminRuleInput = Record<string, unknown>;
@@ -197,83 +194,29 @@ function buildPreviewSuggestions(
 }
 
 async function preview(request: Request, env: Env) {
-  const body=await request.json().catch(()=>({})) as JsonObject; const db=new SupabaseRest(env); let rule:AutomationRuleRow|undefined;
-  if(typeof body.ruleId==="string") { const rows=await db.select<AutomationRuleRow>("automation_rules",new URLSearchParams({select:"*",id:eq(body.ruleId),limit:"1"})); rule=rows[0]; }
-  const settings=(rule?.settings||body.settings||{}) as JsonObject;
-  const searchScope="all" as const;
-  const keyword="";
-  const quantity=Math.min(Math.max(Number(rule?.quantity||body.quantity||3),1),5);
-  const minCommission=rule?.min_commission??nullableNumber(body.minCommission,0,100)??undefined;
-  const minDiscount=rule?.min_discount??nullableNumber(body.minDiscount,0,100)??undefined;
-  const maxPrice=rule?.max_price??nullableNumber(body.maxPrice,0,1_000_000)??undefined;
-  const provider=createShopeeProvider({appId:required(env.SHOPEE_APP_ID,"SHOPEE_APP_ID"),secret:required(env.SHOPEE_SECRET,"SHOPEE_SECRET")});
-  const requestedSort = rule?.sort || (["commission","price","sales","discount"].includes(String(body.sort)) ? String(body.sort) as "commission"|"price"|"sales"|"discount" : undefined);
-  const plan=commissionPlan(minCommission,settings);
-  const effectiveMinCommission=plan.enabled?plan.floor:minCommission;
-  const candidateQuantity=plan.enabled?60:quantity;
-  const result=await searchQualifiedOffers(
-    provider,
-    {keyword,minCommission:effectiveMinCommission,minDiscount,maxPrice,sort:plan.enabled?"commission":requestedSort},
-    candidateQuantity,
-    {maxPages:plan.enabled?3:2,pageSize:50,maxRequests:plan.enabled?12:10,searchScope},
-  );
-
-  const commission=(offer:(typeof result.selected)[number])=>Math.max(0,Number(offer.commissionPercent)||0);
-  const discount=(offer:(typeof result.selected)[number])=>Math.max(0,Number(offer.discountPercent)||0);
-  const sales=(offer:(typeof result.selected)[number])=>Math.max(0,Number(offer.sourceMetadata?.sales)||0);
-  const sortSelected=(offers:typeof result.selected)=>{
-    const copy=[...offers];
-    if(requestedSort==="discount") copy.sort((a,b)=>discount(b)-discount(a)||commission(b)-commission(a));
-    else if(requestedSort==="price") copy.sort((a,b)=>(a.price??Number.POSITIVE_INFINITY)-(b.price??Number.POSITIVE_INFINITY));
-    else if(requestedSort==="sales") copy.sort((a,b)=>sales(b)-sales(a)||commission(b)-commission(a));
-    else copy.sort((a,b)=>commission(b)-commission(a)||discount(b)-discount(a)||sales(b)-sales(a));
-    return copy;
-  };
-
-  let selected=result.selected.slice(0,quantity);
-  let resolvedCommission:number|null=plan.desired||null;
-  const commissionAttempts=plan.enabled
-    ? plan.thresholds.map((threshold)=>({threshold,eligible:result.selected.filter((offer)=>commission(offer)>=threshold).length}))
-    : [];
-
-  if(plan.enabled){
-    const resolved=commissionAttempts.find((attempt)=>attempt.eligible>0);
-    resolvedCommission=resolved?.threshold??null;
-    selected=resolvedCommission==null
-      ? []
-      : sortSelected(result.selected.filter((offer)=>commission(offer)>=resolvedCommission!)).slice(0,quantity);
+  const body=await request.json().catch(()=>({})) as JsonObject;
+  const settings=(body.settings&&typeof body.settings==="object"&&!Array.isArray(body.settings)?body.settings:{}) as JsonObject;
+  const minCommission=nullableNumber(body.minCommission??body.min_commission,0,100)??undefined;
+  const minDiscount=nullableNumber(body.minDiscount??body.min_discount,0,100)??undefined;
+  const maxPrice=nullableNumber(body.maxPrice??body.max_price,0,1_000_000)??undefined;
+  const quantityRaw=Number(body.quantity||1);
+  const quantity=Number.isInteger(quantityRaw)?Math.min(Math.max(quantityRaw,1),20):1;
+  const requestedSort=["commission","price","sales","discount"].includes(String(body.sort))?String(body.sort) as AutomationRuleRow["sort"]:null;
+  const timezone=text(body.timezone,80)||"America/Sao_Paulo";
+  const previewRule:AutomationRuleRow={id:"preview",name:"Prévia",enabled:false,networks:["shopee"],channels:["telegram"],keyword:"",category:null,min_commission:minCommission??null,min_discount:minDiscount??null,max_price:maxPrice??null,quantity,sort:requestedSort,avoid_repeat_days:0,schedule_cron:null,timezone,dry_run:true,settings:{...settings,searchScope:"all"}};
+  const result=await searchOffersForRule(new SupabaseRest(env),env,previewRule,quantity,undefined,new Date());
+  const template=validTemplate(settings.contentTemplate);
+  const thread=Number(settings.telegramThreadId);
+  const messageThreadId=Number.isInteger(thread)&&thread>0?thread:undefined;
+  const flexEnabled=Boolean(settings.flexCommissionEnabled)&&Number(result.commissionTarget)>0;
+  const attempts=(result.commissionAttemptStats||[]).map((item)=>({threshold:item.threshold,eligible:item.eligible}));
+  const diagnostics={scanned:result.scanned,rejectedRelevance:0,invalidMetrics:0,belowCommission:0,belowDiscount:0,aboveMaxPrice:0,equivalentDuplicates:0,excludedRecent:result.excluded,eligible:result.selected.length,zeroSalesAccepted:result.selected.filter((offer)=>Number(offer.sourceMetadata?.sales)===0).length,zeroRatingAccepted:result.selected.filter((offer)=>Number(offer.sourceMetadata?.rating)===0).length};
+  const suggestions:string[]=[];
+  if(result.selected.length===0){
+    if(flexEnabled){suggestions.push(`A busca real percorreu a meta de ${result.commissionTarget}% até o piso de ${Number(settings.flexCommissionFloor)||result.commissionTarget}% sem encontrar uma oferta que também cumpra desconto, preço e fonte selecionados.`);if(minDiscount!=null)suggestions.push(`O desconto mínimo de ${minDiscount}% continua obrigatório em todas as faixas de comissão.`);}
+    else{if(minCommission!=null)suggestions.push(`A comissão está rígida em ${minCommission}%. Ative a flexibilização para permitir faixas menores.`);if(minDiscount!=null)suggestions.push(`Revise o desconto mínimo de ${minDiscount}% se quiser ampliar a busca.`);}
   }
-
-  const template=validTemplate(settings.contentTemplate); const thread=Number(settings.telegramThreadId); const messageThreadId=Number.isInteger(thread)&&thread>0?thread:undefined;
-  const filters={minCommission:minCommission??null,minDiscount:minDiscount??null,maxPrice:maxPrice??null,effectiveMinCommission:effectiveMinCommission??null};
-  let suggestions=buildPreviewSuggestions(result.diagnostics,{minCommission:effectiveMinCommission??null,minDiscount:minDiscount??null,maxPrice:maxPrice??null});
-  if(plan.enabled&&selected.length===0){
-    suggestions=[
-      `A flexibilização já testou a comissão de ${plan.desired}% até o piso autorizado de ${plan.floor}% e não encontrou oferta elegível.`,
-      `Se desejar ampliar mais, reduza o piso de comissão abaixo de ${plan.floor}% ou ajuste os outros filtros.`,
-      ...suggestions.filter((item)=>!item.startsWith("Reduza a comissão mínima")),
-    ].slice(0,3);
-  }
-  return json({
-    dryRun:true,
-    selected:selected.length,
-    scanned:result.scanned,
-    pages:result.pages,
-    diagnostics:result.diagnostics,
-    strategy:result.strategy,
-    searchScope,
-    filters,
-    commissionFlex:{
-      enabled:plan.enabled,
-      target:plan.desired,
-      floor:plan.floor,
-      step:plan.step,
-      resolved:resolvedCommission,
-      attempts:commissionAttempts,
-    },
-    suggestions,
-    publications:selected.map(offer=>({offer,content:generateContent(offer,"telegram",{template,messageThreadId})})),
-  });
+  return json({dryRun:true,selected:result.selected.length,scanned:result.scanned,pages:result.pages,diagnostics,filters:{minCommission:minCommission??null,minDiscount:minDiscount??null,maxPrice:maxPrice??null},suggestions,commissionFlex:{enabled:flexEnabled,target:result.commissionTarget,floor:Number(settings.flexCommissionFloor)||result.commissionTarget,step:Number(settings.flexCommissionStep)||5,resolved:result.commissionResolved,attempts},selectionEngine:"automation",sourceMode:result.sourceMode,sourceNiche:result.sourceNiche,strategy:{scope:result.sourceMode,requests:result.pages,queries:result.sourceNiche?[result.sourceNiche]:["Todos os produtos"],sourceSorts:[requestedSort||"relevance"]},publications:result.selected.map((offer)=>({offer,content:generateContent(offer,"telegram",{template,messageThreadId})}))});
 }
 
 export async function handleAdminApi(request: Request, env: Env) {
@@ -496,8 +439,7 @@ body:before{content:"";position:fixed;inset:0;pointer-events:none;opacity:.22;ba
     var card=byId('livePreviewCard');if(!card)return;if(card.dataset.loading==='1')return;
     card.dataset.loading='1';card.innerHTML='<div class="live-preview-placeholder">Buscando ofertas e analisando cada filtro…</div>';
     try{
-      var targetCommission=Number(byId('minCommission')&&byId('minCommission').value),flexEnabled=Number.isFinite(targetCommission)&&targetCommission>0&&!!(byId('flexCommissionEnabled')&&byId('flexCommissionEnabled').checked),floorValue=Number(byId('flexCommissionFloor')&&byId('flexCommissionFloor').value),stepValue=Number(byId('flexCommissionStep')&&byId('flexCommissionStep').value);var settings={contentTemplate:(byId('contentTemplate')&&byId('contentTemplate').value)||'offer',searchScope:'all',description:(byId('description')&&byId('description').value.trim())||'',telegramThreadId:currentThread(),telegramTopicName:currentTopicName(),flexCommissionEnabled:flexEnabled,flexCommissionStep:[5,10].includes(stepValue)?stepValue:5,flexCommissionFloor:flexEnabled?(Number.isFinite(floorValue)&&floorValue>0?floorValue:Math.max(1,Math.round(targetCommission*0.6*10)/10)):null};
-      var payload={keyword:'',quantity:1,minCommission:byId('minCommission')&&byId('minCommission').value,minDiscount:byId('minDiscount')&&byId('minDiscount').value,maxPrice:byId('maxPrice')&&byId('maxPrice').value,sort:byId('sort')&&byId('sort').value,settings:settings};
+      var payload=typeof window.readAutomationDraftFromForm==='function'?window.readAutomationDraftFromForm():{keyword:'',quantity:1,minCommission:byId('minCommission')&&byId('minCommission').value,minDiscount:byId('minDiscount')&&byId('minDiscount').value,maxPrice:byId('maxPrice')&&byId('maxPrice').value,sort:byId('sort')&&byId('sort').value,settings:{contentTemplate:(byId('contentTemplate')&&byId('contentTemplate').value)||'offer',telegramThreadId:currentThread(),telegramTopicName:currentTopicName()}};
       var res=await api('/api/admin/preview',{method:'POST',body:JSON.stringify(payload)}),pub=res.publications&&res.publications[0];
       if(!pub){card.innerHTML=renderPreviewDiagnostics(res);return}
       var img=pub.offer&&pub.offer.imageUrl?'<img src="'+esc(pub.offer.imageUrl)+'" alt="Produto">':'<div style="width:120px;height:120px;border:1px solid #29416e;border-radius:12px"></div>';
@@ -588,6 +530,8 @@ function smartSection(id,title,description){var grid=document.querySelector('#ru
 function moveSmartNode(target,node){if(target&&node&&node.parentElement!==target)target.appendChild(node)}
 function organizeSmartForm(){var form=document.getElementById('ruleForm'),grid=form&&form.querySelector('.form-grid');if(!grid)return;var identity=smartSection('formIdentity','1 · Identificação','Dê um nome claro para reconhecer a automação.'),source=smartSection('formSource','2 · Fonte dos produtos','Escolha de onde virão as ofertas.'),quality=smartSection('formQuality','3 · Critérios das ofertas','Defina qualidade, comissão, desconto e repetição.'),agenda=smartSection('formAgenda','4 · Agenda','Defina período, dias, janela e frequência.'),destination=smartSection('formDestination','5 · Destino','Escolha onde a publicação será enviada.'),content=smartSection('formContent','6 · Conteúdo','Escolha o formato da mensagem e confira a prévia.'),execution=smartSection('formExecution','7 · Execução','Defina se ficará ativa e se está em modo de teste.');var field=function(id){var e=document.getElementById(id);return e&&e.closest('.field')};moveSmartNode(identity,field('name'));moveSmartNode(identity,field('description'));var sourceBlock=document.getElementById('sourceMode')?.closest('.smart-form-block');moveSmartNode(source,sourceBlock);moveSmartNode(source,field('sourceList'));moveSmartNode(quality,field('repeatDays'));moveSmartNode(quality,field('minCommission'));moveSmartNode(quality,field('minDiscount'));moveSmartNode(quality,field('maxPrice'));moveSmartNode(quality,field('sort'));moveSmartNode(quality,document.getElementById('flexCommissionEnabled')?.closest('.smart-form-block'));var dateBlock=document.getElementById('activeStartDate')?.closest('.smart-form-block');moveSmartNode(agenda,dateBlock);moveSmartNode(agenda,field('intervalMinutes'));var cap=document.getElementById('capacityBox');if(cap)moveSmartNode(agenda,cap);moveSmartNode(destination,field('telegramTopic')||field('threadId'));var tz=field('timezone');if(tz){var label=tz.querySelector('label');if(label)label.textContent='Fuso horário';moveSmartNode(destination,tz)}moveSmartNode(content,field('contentTemplate'));moveSmartNode(content,document.getElementById('livePreviewCard')?.closest('.field'));moveSmartNode(execution,field('enabled'));[sourceBlock,dateBlock].forEach(function(block){var title=block&&block.querySelector('.smart-form-title');if(title)title.style.display='none'});var scheduleField=field('intervalMinutes');if(scheduleField){var helper=scheduleField.querySelector('small.muted');if(helper)helper.textContent='A plataforma acompanha automaticamente a agenda e publica quando chegar cada horário configurado.'}updateCapacity();updateFlexUI()}
 function hydrateSmartForm(ruleId){ensureSmartForm();var r=ruleId&&SMART.data?(SMART.data.rules||[]).find(function(x){return x.id===ruleId}):null,s=r&&r.settings||{},target=Number(r&&r.min_commission);var start=document.getElementById('activeStartDate');if(start)start.value=s.activeStartDate||smartDateToday();var end=document.getElementById('activeEndDate');if(end)end.value=s.activeEndDate||'';var mode=document.getElementById('sourceMode');if(mode)mode.value=s.sourceMode||((s.listId)?'list':'all');var niche=document.getElementById('sourceNiche');if(niche)niche.value=s.niche||'casa_cozinha';document.querySelectorAll('[data-weekday]').forEach(function(e){e.checked=!Array.isArray(s.activeWeekdays)||s.activeWeekdays.length===0||s.activeWeekdays.map(Number).indexOf(Number(e.dataset.weekday))>=0});document.querySelectorAll('[data-mix-check]').forEach(function(e){var found=Array.isArray(s.nicheMix)?s.nicheMix.find(function(x){return x.niche===e.dataset.mixCheck}):null;e.checked=!!found;var w=document.querySelector('[data-mix-weight="'+e.dataset.mixCheck+'"]');if(w){w.disabled=!found;w.value=found?String(found.weight||20):'20'}});var fe=document.getElementById('flexCommissionEnabled');if(fe)fe.checked=!!s.flexCommissionEnabled&&Number.isFinite(target)&&target>0;var fs=document.getElementById('flexCommissionStep');if(fs)fs.value=String([5,10].includes(Number(s.flexCommissionStep))?Number(s.flexCommissionStep):5);var ff=document.getElementById('flexCommissionFloor');if(ff){ff.value=s.flexCommissionFloor!=null&&Number(s.flexCommissionFloor)>0?String(s.flexCommissionFloor):(Number.isFinite(target)&&target>0?String(suggestedCommissionFloor(target)):'');ff.dataset.touched=s.flexCommissionFloor!=null&&Number(s.flexCommissionFloor)>0?'1':''}updateSourceFields();organizeSmartForm();updateFlexUI();updateCapacity();setTimeout(function(){organizeSmartForm();updateFlexUI();updateCapacity()},260)}
+function readAutomationDraftFromForm(){var val=function(id){var e=document.getElementById(id);return e?e.value:''},num=function(id){var v=val(id);return v===''?null:Number(v)},list=document.getElementById('sourceList');var settings={contentTemplate:val('contentTemplate')||'offer',intervalMinutes:Number(val('intervalMinutes'))||60,windowStart:val('windowStart')||'09:00',windowEnd:val('windowEnd')||'22:00',telegramThreadId:currentThread(),telegramTopicName:currentThread()?currentTopicName():null,listId:list&&list.value||null,listName:list&&list.selectedIndex>0?list.options[list.selectedIndex].text.split(' · ')[0]:null};var body={min_commission:num('minCommission'),min_discount:num('minDiscount'),max_price:num('maxPrice'),sort:val('sort')||null,quantity:1,timezone:val('timezone')||'America/Sao_Paulo',settings:settings};collectSmartSettings(body);return{keyword:'',quantity:1,minCommission:body.min_commission,minDiscount:body.min_discount,maxPrice:body.max_price,sort:body.sort,timezone:body.timezone,settings:body.settings};}
+window.readAutomationDraftFromForm=readAutomationDraftFromForm;
 function collectSmartSettings(body){ensureSmartForm();body.quantity=1;body.settings=Object.assign({},body.settings||{});var s=body.settings;s.scheduleMode='slots';s.activeStartDate=document.getElementById('activeStartDate')?.value||smartDateToday();s.activeEndDate=document.getElementById('activeEndDate')?.value||null;s.activeWeekdays=Array.from(document.querySelectorAll('[data-weekday]:checked')).map(function(e){return Number(e.dataset.weekday)});s.sourceMode=document.getElementById('sourceMode')?.value||'all';s.niche=s.sourceMode==='niche'?(document.getElementById('sourceNiche')?.value||null):null;s.nicheMix=s.sourceMode==='mix'?Array.from(document.querySelectorAll('[data-mix-check]:checked')).map(function(e){return{niche:e.dataset.mixCheck,weight:Number(document.querySelector('[data-mix-weight="'+e.dataset.mixCheck+'"]')?.value)||20}}):[];if(s.sourceMode!=='list'){s.listId=null;s.listName=null;var sl=document.getElementById('sourceList');if(sl)sl.value=''}var target=Number(body.min_commission);s.flexCommissionEnabled=Number.isFinite(target)&&target>0&&!!document.getElementById('flexCommissionEnabled')?.checked;s.flexCommissionStep=[5,10].includes(Number(document.getElementById('flexCommissionStep')?.value))?Number(document.getElementById('flexCommissionStep')?.value):5;if(s.flexCommissionEnabled){var floor=Number(document.getElementById('flexCommissionFloor')?.value);if(!Number.isFinite(floor)||floor<=0)floor=suggestedCommissionFloor(target);s.flexCommissionFloor=Math.min(target,Math.max(1,floor))}else{s.flexCommissionFloor=null}return body}
 async function smartRefresh(){if(!sToken())return;try{SMART.data=await sApi('/api/admin/dashboard');try{SMART.telegram=await sApi('/api/admin/telegram')}catch(e){}renderSmartDashboard();renderSmartAutomations();renderActivity();renderIntegrationsCommercial()}catch(e){console.warn('smart refresh',e)}}
 function setupLayout(){var navQueue=document.querySelector('.nav button[data-view="queue"] span');if(navQueue)navQueue.textContent='Atividade';['published','logs'].forEach(function(v){var b=document.querySelector('.nav button[data-view="'+v+'"]');if(b)b.classList.add('smart-hidden')});var navSet=document.querySelector('.nav button[data-view="settings"] span');if(navSet)navSet.textContent='Integrações';var showPaused=document.getElementById('showPaused');if(showPaused)showPaused.checked=true;var dash=document.getElementById('view-dashboard');if(dash&&!document.getElementById('commercialDashboard')){var d=document.createElement('div');d.id='commercialDashboard';d.className='smart-dashboard';dash.prepend(d);document.getElementById('metrics')?.classList.add('smart-hidden');document.getElementById('dashboardRules')?.closest('.section')?.classList.add('smart-hidden');document.getElementById('dashboardPublished')?.closest('.section')?.classList.add('smart-hidden')}var auto=document.getElementById('view-automations');if(auto&&!document.getElementById('commercialAutomations')){var a=document.createElement('div');a.id='commercialAutomations';a.className='smart-automations';auto.prepend(a);auto.querySelector('.view-head')?.classList.add('smart-hidden');document.getElementById('rules')?.classList.add('smart-hidden')}var qv=document.getElementById('view-queue');if(qv&&!document.getElementById('commercialActivity')){var q=document.createElement('div');q.id='commercialActivity';q.className='smart-activity';qv.prepend(q);Array.from(qv.children).forEach(function(x){if(x!==q)x.classList.add('smart-hidden')})}var set=document.getElementById('view-settings');if(set&&!document.getElementById('commercialIntegrations')){var i=document.createElement('div');i.id='commercialIntegrations';i.className='smart-integrations';set.prepend(i);document.getElementById('integrations')?.classList.add('smart-hidden');document.getElementById('logoutBtn')?.closest('.section')?.classList.add('smart-hidden')}ensureSmartForm();organizeSmartForm();updateFlexUI();updateCapacity()}
